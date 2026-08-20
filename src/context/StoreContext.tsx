@@ -85,27 +85,58 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [bankSettings, setBankSettings] = useState<BankSettings>(INITIAL_BANK_SETTINGS);
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
+  /**
+   * Pull the whole store from Supabase.
+   *
+   * Called on mount and again after every mutation, because the database is the
+   * source of truth once it is connected: place_order() recomputes prices and
+   * deducts stock server-side, so the browser's optimistic copy is a guess until
+   * it is refreshed. Empty tables are honoured as empty — the old code treated
+   * `length === 0` as "fall back to seed data", which silently painted 15 demo
+   * products over a genuinely empty catalogue.
+   */
+  const refetchFromSupabase = async (): Promise<string | null> => {
+    if (!isSupabaseConfigured || !supabase) return null;
+
+    const [catRes, prodRes, ordRes, adjRes] = await Promise.all([
+      supabase.from('categories').select('*').order('display_order', { ascending: true }),
+      supabase.from('products').select('*').order('created_at', { ascending: false }),
+      supabase
+        .from('orders')
+        .select('*, items:order_items(*)')
+        .order('created_at', { ascending: false }),
+      supabase
+        .from('inventory_adjustments')
+        .select('*')
+        .order('created_at', { ascending: false }),
+    ]);
+
+    const failure = catRes.error || prodRes.error || ordRes.error || adjRes.error;
+    if (failure) {
+      console.error('Supabase read failed:', failure.message);
+      return failure.message;
+    }
+
+    setCategories(catRes.data ?? []);
+    setProducts(prodRes.data ?? []);
+    setOrders((ordRes.data ?? []) as Order[]);
+    setAdjustments((adjRes.data ?? []) as InventoryAdjustment[]);
+    return null;
+  };
+
   // Initialize from LocalStorage or Supabase
   useEffect(() => {
     const initializeData = async () => {
       if (isSupabaseConfigured && supabase) {
-        try {
-          const [catRes, prodRes, ordRes, adjRes] = await Promise.all([
-            supabase.from('categories').select('*').order('display_order', { ascending: true }),
-            supabase.from('products').select('*').order('created_at', { ascending: false }),
-            supabase.from('orders').select('*, items:order_items(*)').order('created_at', { ascending: false }),
-            supabase.from('inventory_adjustments').select('*').order('created_at', { ascending: false }),
-          ]);
-
-          if (catRes.data && catRes.data.length > 0) setCategories(catRes.data);
-          if (prodRes.data && prodRes.data.length > 0) setProducts(prodRes.data);
-          if (ordRes.data && ordRes.data.length > 0) setOrders(ordRes.data);
-          if (adjRes.data && adjRes.data.length > 0) setAdjustments(adjRes.data);
+        const error = await refetchFromSupabase();
+        if (!error) {
           setIsLoading(false);
           return;
-        } catch (err) {
-          console.warn('Supabase fetch failed, falling back to local state:', err);
         }
+        // Reaching here means the keys are set but the database is unreachable
+        // or the schema is missing. Falling through to the demo catalogue keeps
+        // the storefront usable, and the console line above says why.
+        console.warn('Falling back to local demo data.');
       }
 
       // Load from LocalStorage
@@ -151,15 +182,21 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     initializeData();
   }, []);
 
-  // Save to LocalStorage whenever state changes
+  // Save to LocalStorage whenever state changes.
+  // Skipped entirely when Supabase is connected: mirroring server rows into
+  // localStorage means a stale copy wins on the next reload, and it would also
+  // leave one customer's order history sitting in the next visitor's browser on
+  // a shared machine. Bank settings stay local either way — there is no table.
   useEffect(() => {
-    if (!isLoading) {
-      localStorage.setItem('freshmart_products', JSON.stringify(products));
-      localStorage.setItem('freshmart_categories', JSON.stringify(categories));
-      localStorage.setItem('freshmart_orders', JSON.stringify(orders));
-      localStorage.setItem('freshmart_adjustments', JSON.stringify(adjustments));
-      localStorage.setItem('freshmart_bank_settings', JSON.stringify(bankSettings));
-    }
+    if (isLoading) return;
+
+    localStorage.setItem('freshmart_bank_settings', JSON.stringify(bankSettings));
+    if (isSupabaseConfigured) return;
+
+    localStorage.setItem('freshmart_products', JSON.stringify(products));
+    localStorage.setItem('freshmart_categories', JSON.stringify(categories));
+    localStorage.setItem('freshmart_orders', JSON.stringify(orders));
+    localStorage.setItem('freshmart_adjustments', JSON.stringify(adjustments));
   }, [products, categories, orders, adjustments, bankSettings, isLoading]);
 
   const updateBankSettings = async (settings: Partial<BankSettings>): Promise<void> => {
@@ -168,37 +205,98 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     localStorage.setItem('freshmart_bank_settings', JSON.stringify(updated));
   };
 
+  /**
+   * Supabase's client returns errors in `{ error }` rather than throwing, so a
+   * try/catch around `.insert()` catches nothing and a row rejected by RLS looks
+   * exactly like a successful write. Every call goes through this instead, which
+   * turns an RLS refusal or constraint violation into a real exception the UI
+   * can show. RLS denials on write arrive either as an explicit policy error or
+   * as zero rows affected, so both are treated as failure.
+   */
+  const failIfError = <T,>(
+    result: { data: T | null; error: { message: string } | null },
+    action: string
+  ): T => {
+    if (result.error) {
+      throw new Error(`${action} failed: ${result.error.message}`);
+    }
+    if (result.data === null) {
+      throw new Error(
+        `${action} was blocked. You may not have permission, or your admin session expired.`
+      );
+    }
+    return result.data;
+  };
+
   // Product Operations
   const addProduct = async (productData: Omit<Product, 'id' | 'created_at'>): Promise<Product> => {
+    if (isSupabaseConfigured && supabase) {
+      // No client-generated id: the products table has its own default, and a
+      // timestamp id would collide the moment two admins add a product together.
+      const created = failIfError(
+        await supabase.from('products').insert([productData]).select().single(),
+        'Adding the product'
+      ) as Product;
+
+      if (created.stock_quantity > 0) {
+        // Opening balance for the audit trail. Written directly rather than via
+        // adjustStock(), which would add the quantity a second time.
+        await supabase.from('inventory_adjustments').insert([
+          {
+            product_id: created.id,
+            adjustment_type: 'restock',
+            quantity_change: created.stock_quantity,
+            previous_quantity: 0,
+            new_quantity: created.stock_quantity,
+            reason: 'Opening stock on product creation',
+            performed_by: 'Store Manager',
+          },
+        ]);
+      }
+
+      await refetchFromSupabase();
+      return created;
+    }
+
     const newProduct: Product = {
       ...productData,
       id: `prod_${Date.now()}`,
       created_at: new Date().toISOString(),
     };
-
-    if (isSupabaseConfigured && supabase) {
-      await supabase.from('products').insert([newProduct]);
-    }
-
     setProducts(prev => [newProduct, ...prev]);
 
-    // Record initial inventory if stock > 0
     if (newProduct.stock_quantity > 0) {
-      await adjustStock(
-        newProduct.id,
-        'restock',
-        newProduct.stock_quantity,
-        'Initial stock on product creation',
-        'Store Manager'
-      );
+      setAdjustments(prev => [
+        {
+          id: `adj_${Date.now()}_${newProduct.id}`,
+          product_id: newProduct.id,
+          product_name: newProduct.name,
+          adjustment_type: 'restock',
+          quantity_change: newProduct.stock_quantity,
+          previous_quantity: 0,
+          new_quantity: newProduct.stock_quantity,
+          reason: 'Opening stock on product creation',
+          performed_by: 'Store Manager',
+          created_at: new Date().toISOString(),
+        },
+        ...prev,
+      ]);
     }
 
     return newProduct;
   };
 
   const updateProduct = async (id: string, updates: Partial<Product>): Promise<Product> => {
-    let updated: Product | null = null;
+    if (isSupabaseConfigured && supabase) {
+      const updated = failIfError(
+        await supabase.from('products').update(updates).eq('id', id).select().single(),
+        'Updating the product'
+      ) as Product;
+      setProducts(prev => prev.map(p => (p.id === id ? updated : p)));
+      return updated;
+    }
 
+    let updated: Product | null = null;
     setProducts(prev =>
       prev.map(p => {
         if (p.id === id) {
@@ -208,31 +306,34 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         return p;
       })
     );
-
-    if (isSupabaseConfigured && supabase && updated) {
-      await supabase.from('products').update(updates).eq('id', id);
-    }
-
     return updated || ({} as Product);
   };
 
   const deleteProduct = async (id: string): Promise<boolean> => {
-    setProducts(prev => prev.filter(p => p.id !== id));
     if (isSupabaseConfigured && supabase) {
-      await supabase.from('products').delete().eq('id', id);
+      failIfError(
+        await supabase.from('products').delete().eq('id', id).select(),
+        'Deleting the product'
+      );
+      setProducts(prev => prev.filter(p => p.id !== id));
+      return true;
     }
+
+    setProducts(prev => prev.filter(p => p.id !== id));
     return true;
   };
 
   // Category Operations
   const addCategory = async (catData: Omit<Category, 'id'>): Promise<Category> => {
-    const newCategory: Category = {
-      ...catData,
-      id: `cat_${Date.now()}`,
-    };
+    const newCategory: Category = { ...catData, id: `cat_${Date.now()}` };
 
     if (isSupabaseConfigured && supabase) {
-      await supabase.from('categories').insert([newCategory]);
+      const created = failIfError(
+        await supabase.from('categories').insert([newCategory]).select().single(),
+        'Adding the category'
+      ) as Category;
+      setCategories(prev => [...prev, created]);
+      return created;
     }
 
     setCategories(prev => [...prev, newCategory]);
@@ -240,8 +341,16 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   };
 
   const updateCategory = async (id: string, updates: Partial<Category>): Promise<Category> => {
-    let updated: Category | null = null;
+    if (isSupabaseConfigured && supabase) {
+      const updated = failIfError(
+        await supabase.from('categories').update(updates).eq('id', id).select().single(),
+        'Updating the category'
+      ) as Category;
+      setCategories(prev => prev.map(c => (c.id === id ? updated : c)));
+      return updated;
+    }
 
+    let updated: Category | null = null;
     setCategories(prev =>
       prev.map(c => {
         if (c.id === id) {
@@ -251,19 +360,20 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         return c;
       })
     );
-
-    if (isSupabaseConfigured && supabase && updated) {
-      await supabase.from('categories').update(updates).eq('id', id);
-    }
-
     return updated || ({} as Category);
   };
 
   const deleteCategory = async (id: string): Promise<boolean> => {
-    setCategories(prev => prev.filter(c => c.id !== id));
     if (isSupabaseConfigured && supabase) {
-      await supabase.from('categories').delete().eq('id', id);
+      failIfError(
+        await supabase.from('categories').delete().eq('id', id).select(),
+        'Deleting the category'
+      );
+      setCategories(prev => prev.filter(c => c.id !== id));
+      return true;
     }
+
+    setCategories(prev => prev.filter(c => c.id !== id));
     return true;
   };
 
@@ -278,6 +388,24 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const product = products.find(p => p.id === productId);
     if (!product) {
       return { success: false, error: 'Product not found' };
+    }
+
+    if (isSupabaseConfigured && supabase) {
+      // One transaction in the database: stock update + audit row together.
+      // Doing it as two client calls could log an adjustment that never applied,
+      // or apply one that was never logged.
+      const { error } = await supabase.rpc('admin_adjust_stock', {
+        p_product_id: productId,
+        p_adjustment_type: adjustmentType,
+        p_quantity_change: quantityChange,
+        p_reason: reason,
+        p_performed_by: performedBy,
+      });
+
+      if (error) return { success: false, error: error.message };
+
+      await refetchFromSupabase();
+      return { success: true };
     }
 
     const previous_quantity = product.stock_quantity;
@@ -304,13 +432,6 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     setAdjustments(prev => [newAdjustment, ...prev]);
 
-    if (isSupabaseConfigured && supabase) {
-      await Promise.all([
-        supabase.from('products').update({ stock_quantity: new_quantity }).eq('id', productId),
-        supabase.from('inventory_adjustments').insert([newAdjustment]),
-      ]);
-    }
-
     return { success: true };
   };
 
@@ -318,6 +439,63 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const createOrder = async (
     input: CreateOrderInput
   ): Promise<{ success: boolean; order?: Order; error?: string }> => {
+    /* ------------------------------------------------------------------ *
+     * Supabase path: one call, one transaction.
+     *
+     * Only product ids and quantities are sent. Prices, delivery fee, tax and
+     * the grand total are all recomputed inside place_order() from the products
+     * table, so a tampered request cannot buy a $40 basket for a penny. Stock is
+     * checked and deducted under a row lock in the same transaction, which also
+     * closes the oversell race the client-side check could never catch.
+     * ------------------------------------------------------------------ */
+    if (isSupabaseConfigured && supabase) {
+      const isInstant =
+        input.paymentMethod === 'upi_intent' ||
+        input.paymentMethod === 'card_online' ||
+        input.paymentMethod === 'digital_wallet';
+
+      const { data, error } = await supabase.rpc('place_order', {
+        p_items: input.items.map(i => ({
+          product_id: i.product.id,
+          quantity: i.quantity,
+        })),
+        p_customer_name: input.customerName,
+        p_phone: input.phone,
+        p_email: input.email,
+        p_address: input.address,
+        p_fulfillment_type: input.fulfillmentType,
+        p_delivery_slot: input.deliverySlot,
+        p_payment_method: input.paymentMethod,
+        p_payment_status: isInstant ? 'paid' : 'pending',
+        p_payment_details: {
+          card_brand: input.paymentDetails?.cardBrand,
+          card_last4: input.paymentDetails?.cardLast4,
+          wallet_provider: input.paymentDetails?.walletProvider,
+          upi_id: input.paymentDetails?.upiId,
+          utr_number: input.paymentDetails?.utrNumber,
+          bank_ref: input.paymentDetails?.bankRef,
+        },
+        p_transaction_id: isInstant
+          ? `TXN-${Math.floor(100000 + Math.random() * 900000)}`
+          : null,
+        p_utr_number: input.utrNumber ?? null,
+        p_notes: input.notes ?? '',
+      });
+
+      if (error) {
+        // "Only 2 left of Baby Spinach Leaves" and friends are raised by the
+        // function itself and are safe to show the shopper as-is.
+        return { success: false, error: error.message };
+      }
+
+      const placed = data as unknown as Order;
+      await refetchFromSupabase();
+      // A guest order is invisible to the orders SELECT policy, so keep the copy
+      // the function handed back — the receipt page reads orders from here.
+      setOrders(prev => (prev.some(o => o.id === placed.id) ? prev : [placed, ...prev]));
+      return { success: true, order: placed };
+    }
+
     // 1. Validate Stock Availability for all items
     for (const item of input.items) {
       const currentProduct = products.find(p => p.id === item.product.id);
@@ -429,37 +607,6 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setAdjustments(prev => [...newSaleAdjustments, ...prev]);
     setOrders(prev => [newOrder, ...prev]);
 
-    // 5. Sync to Supabase if configured
-    if (isSupabaseConfigured && supabase) {
-      try {
-        await supabase.from('orders').insert([
-          {
-            id: newOrder.id,
-            order_number: newOrder.order_number,
-            user_id: newOrder.user_id,
-            customer_name: newOrder.customer_name,
-            phone: newOrder.phone,
-            email: newOrder.email,
-            address: newOrder.address,
-            fulfillment_type: newOrder.fulfillment_type,
-            delivery_slot: newOrder.delivery_slot,
-            payment_method: newOrder.payment_method,
-            payment_status: newOrder.payment_status,
-            order_status: newOrder.order_status,
-            subtotal: newOrder.subtotal,
-            delivery_fee: newOrder.delivery_fee,
-            tax: newOrder.tax,
-            total: newOrder.total,
-            notes: newOrder.notes,
-          },
-        ]);
-
-        await supabase.from('order_items').insert(newOrder.items);
-      } catch (err) {
-        console.error('Failed to sync order to Supabase:', err);
-      }
-    }
-
     return { success: true, order: newOrder };
   };
 
@@ -473,6 +620,27 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     const oldStatus = order.order_status;
     if (oldStatus === newStatus) return { success: true };
+
+    if (isSupabaseConfigured && supabase) {
+      // Cancelling has to put the reserved stock back, so it goes through the
+      // transactional RPC rather than a bare status update.
+      if (newStatus === 'cancelled') {
+        const { error } = await supabase.rpc('admin_cancel_order', { p_order_id: orderId });
+        if (error) return { success: false, error: error.message };
+      } else {
+        const { error } = await supabase
+          .from('orders')
+          .update({
+            order_status: newStatus,
+            ...(newStatus === 'completed' ? { payment_status: 'paid' } : {}),
+          })
+          .eq('id', orderId);
+        if (error) return { success: false, error: error.message };
+      }
+
+      await refetchFromSupabase();
+      return { success: true };
+    }
 
     // If order is newly cancelled, restore product inventory
     if (newStatus === 'cancelled' && oldStatus !== 'cancelled') {
@@ -523,17 +691,19 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       )
     );
 
-    if (isSupabaseConfigured && supabase) {
-      await supabase
-        .from('orders')
-        .update({ order_status: newStatus })
-        .eq('id', orderId);
-    }
-
     return { success: true };
   };
 
   const resetToDemoData = () => {
+    // Against a real database this would only desynchronise the UI from the
+    // rows that are actually there — and if it were wired to delete, it would
+    // destroy live orders. The button is hidden when Supabase is connected;
+    // this guard covers any other caller.
+    if (isSupabaseConfigured) {
+      console.warn('resetToDemoData ignored: Supabase is the source of truth.');
+      return;
+    }
+
     setCategories(INITIAL_CATEGORIES);
     setProducts(INITIAL_PRODUCTS);
     setOrders(INITIAL_ORDERS);

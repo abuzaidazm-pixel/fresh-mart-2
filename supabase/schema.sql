@@ -18,11 +18,22 @@ EXCEPTION
     WHEN duplicate_object THEN null;
 END $$;
 
+-- NOTE: must list every value in src/lib/types.ts -> PaymentMethod.
+-- The app sends 'upi_intent', 'bank_transfer' and 'digital_wallet' too; leaving
+-- them out makes every UPI/card order fail with "invalid input value for enum".
 DO $$ BEGIN
-    CREATE TYPE payment_method_type AS ENUM ('cash_on_delivery', 'pay_at_store', 'card_online');
+    CREATE TYPE payment_method_type AS ENUM (
+        'cash_on_delivery', 'pay_at_store', 'card_online',
+        'upi_intent', 'bank_transfer', 'digital_wallet'
+    );
 EXCEPTION
     WHEN duplicate_object THEN null;
 END $$;
+
+-- If the type already existed from an earlier run, top it up.
+ALTER TYPE payment_method_type ADD VALUE IF NOT EXISTS 'upi_intent';
+ALTER TYPE payment_method_type ADD VALUE IF NOT EXISTS 'bank_transfer';
+ALTER TYPE payment_method_type ADD VALUE IF NOT EXISTS 'digital_wallet';
 
 DO $$ BEGIN
     CREATE TYPE payment_status_type AS ENUM ('pending', 'paid', 'failed', 'refunded');
@@ -129,6 +140,9 @@ CREATE TABLE IF NOT EXISTS public.orders (
     payment_method payment_method_type NOT NULL DEFAULT 'cash_on_delivery',
     payment_status payment_status_type NOT NULL DEFAULT 'pending',
     order_status order_status_type NOT NULL DEFAULT 'pending',
+    transaction_id TEXT,
+    utr_number TEXT,
+    payment_details JSONB NOT NULL DEFAULT '{}'::jsonb,
     subtotal NUMERIC(10, 2) NOT NULL CHECK (subtotal >= 0),
     delivery_fee NUMERIC(10, 2) NOT NULL DEFAULT 0.00 CHECK (delivery_fee >= 0),
     tax NUMERIC(10, 2) NOT NULL DEFAULT 0.00 CHECK (tax >= 0),
@@ -190,19 +204,28 @@ CREATE TRIGGER update_orders_modtime
     FOR EACH ROW EXECUTE FUNCTION public.handle_updated_at();
 
 -- Auto Create Profile when Auth User Signs Up
+--
+-- SECURITY: role is ALWAYS forced to 'customer'. It must never be read from
+-- raw_user_meta_data, because that is supplied by the browser at sign-up — a
+-- visitor could simply post {"role":"admin"} and mint themselves an admin
+-- account. Admins are promoted by hand; see section 9 at the bottom.
 CREATE OR REPLACE FUNCTION public.handle_new_user()
-RETURNS TRIGGER AS $$
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
 BEGIN
     INSERT INTO public.profiles (id, email, full_name, role)
     VALUES (
         NEW.id,
         NEW.email,
         COALESCE(NEW.raw_user_meta_data->>'full_name', split_part(NEW.email, '@', 1)),
-        COALESCE((NEW.raw_user_meta_data->>'role')::user_role, 'customer')
+        'customer'
     );
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$;
 
 CREATE OR REPLACE TRIGGER on_auth_user_created
     AFTER INSERT ON auth.users
@@ -219,60 +242,110 @@ ALTER TABLE public.addresses ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.orders ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.order_items ENABLE ROW LEVEL SECURITY;
 
--- Helper to check if current user is admin
+-- Helper to check if current user is admin.
+-- SECURITY DEFINER so it can read profiles without tripping profiles' own RLS
+-- (which would recurse). search_path is pinned so a rogue temp schema cannot
+-- shadow `profiles` and trick the function into returning true.
 CREATE OR REPLACE FUNCTION public.is_admin()
-RETURNS BOOLEAN AS $$
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+STABLE
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
 BEGIN
     RETURN EXISTS (
         SELECT 1 FROM public.profiles
         WHERE id = auth.uid() AND role = 'admin'
     );
 END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
+$$;
+
+-- Stop users from promoting themselves by PATCHing their own profile row.
+-- The UPDATE policy below lets a user edit their profile; without this guard
+-- that includes the `role` column.
+CREATE OR REPLACE FUNCTION public.guard_profile_role()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+BEGIN
+    -- auth.uid() IS NULL means there is no end-user JWT on the request: this is
+    -- the SQL Editor or the service role. That is the intended promotion path
+    -- (see section 9), so let it through. A browser request always carries a
+    -- JWT, and anon has no UPDATE grant on profiles anyway.
+    IF NEW.role IS DISTINCT FROM OLD.role
+       AND auth.uid() IS NOT NULL
+       AND NOT public.is_admin() THEN
+        RAISE EXCEPTION 'Only an administrator can change a profile role';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS protect_profile_role ON public.profiles;
+CREATE TRIGGER protect_profile_role
+    BEFORE UPDATE ON public.profiles
+    FOR EACH ROW EXECUTE FUNCTION public.guard_profile_role();
 
 -- Profiles Policies
+DROP POLICY IF EXISTS "Users can read own profile" ON public.profiles;
 CREATE POLICY "Users can read own profile" ON public.profiles
     FOR SELECT USING (auth.uid() = id OR public.is_admin());
 
+DROP POLICY IF EXISTS "Users can update own profile" ON public.profiles;
 CREATE POLICY "Users can update own profile" ON public.profiles
     FOR UPDATE USING (auth.uid() = id OR public.is_admin());
 
 -- Categories Policies (Public read, admin write)
+DROP POLICY IF EXISTS "Public categories read" ON public.categories;
 CREATE POLICY "Public categories read" ON public.categories
     FOR SELECT USING (true);
 
+DROP POLICY IF EXISTS "Admin categories manage" ON public.categories;
 CREATE POLICY "Admin categories manage" ON public.categories
     FOR ALL USING (public.is_admin());
 
 -- Products Policies (Public can read active products, Admin can manage all)
+DROP POLICY IF EXISTS "Public active products read" ON public.products;
 CREATE POLICY "Public active products read" ON public.products
     FOR SELECT USING (is_active = true OR public.is_admin());
 
+DROP POLICY IF EXISTS "Admin products manage" ON public.products;
 CREATE POLICY "Admin products manage" ON public.products
     FOR ALL USING (public.is_admin());
 
 -- Inventory Adjustments Policies (Admin only)
+DROP POLICY IF EXISTS "Admin inventory adjustments view" ON public.inventory_adjustments;
 CREATE POLICY "Admin inventory adjustments view" ON public.inventory_adjustments
     FOR SELECT USING (public.is_admin());
 
+DROP POLICY IF EXISTS "Admin inventory adjustments insert" ON public.inventory_adjustments;
 CREATE POLICY "Admin inventory adjustments insert" ON public.inventory_adjustments
     FOR INSERT WITH CHECK (public.is_admin());
 
 -- Addresses Policies (Users can manage their own addresses)
+DROP POLICY IF EXISTS "Users manage own addresses" ON public.addresses;
 CREATE POLICY "Users manage own addresses" ON public.addresses
     FOR ALL USING (auth.uid() = user_id OR public.is_admin());
 
 -- Orders Policies (Customers read own, can insert; Admin can manage all)
+DROP POLICY IF EXISTS "Customers view own orders" ON public.orders;
 CREATE POLICY "Customers view own orders" ON public.orders
     FOR SELECT USING (auth.uid() = user_id OR public.is_admin());
 
-CREATE POLICY "Customers create orders" ON public.orders
-    FOR INSERT WITH CHECK (auth.uid() = user_id OR user_id IS NULL);
+-- NOTE: there is deliberately NO direct INSERT policy for customers.
+-- Orders are created only through public.place_order() below, which recomputes
+-- every price server-side. A direct insert policy would let anyone POST an
+-- order with total = 0.01, because the browser controls the request body.
 
+DROP POLICY IF EXISTS "Admin manage orders" ON public.orders;
 CREATE POLICY "Admin manage orders" ON public.orders
     FOR ALL USING (public.is_admin());
 
 -- Order Items Policies
+DROP POLICY IF EXISTS "Users view own order items" ON public.order_items;
 CREATE POLICY "Users view own order items" ON public.order_items
     FOR SELECT USING (
         EXISTS (
@@ -282,8 +355,9 @@ CREATE POLICY "Users view own order items" ON public.order_items
         )
     );
 
-CREATE POLICY "Insert order items" ON public.order_items
-    FOR INSERT WITH CHECK (true);
+-- Likewise no INSERT policy here: WITH CHECK (true) would have allowed any
+-- visitor to append arbitrary line items onto anyone else's order.
+-- place_order() is SECURITY DEFINER, so it bypasses RLS and writes them itself.
 
 -- ==============================================================================
 -- 7. INITIAL SEED DATA (9 Categories + 30+ Products)
@@ -319,3 +393,321 @@ INSERT INTO public.products (id, name, slug, category_id, price, compare_at_pric
 ('prod_14', 'Roasted Sea Salt Almonds', 'roasted-sea-salt-almonds', 'cat_snacks', 6.99, 8.49, '300 g Pouch', 'https://images.unsplash.com/photo-1508061253366-f7da158b6d46?w=600&auto=format&fit=crop&q=80', 'Crunchy dry-roasted California almonds lightly seasoned with pure Pacific sea salt.', 24, 6, true, true),
 ('prod_15', 'Eco Dishwashing Liquid', 'eco-dishwashing-liquid', 'cat_household', 3.49, 4.29, '500 ml Bottle', 'https://images.unsplash.com/photo-1585670210693-e7fdd16b142e?w=600&auto=format&fit=crop&q=80', 'Plant-powered biodegradable dish soap that cuts through grease while being gentle on hands.', 30, 8, true, false)
 ON CONFLICT (id) DO NOTHING;
+
+
+-- ==============================================================================
+-- 8. SERVER-SIDE TRANSACTIONS (RPC)
+-- ==============================================================================
+-- Everything that must be atomic, or must not be trusted to the browser, lives
+-- here. These run as SECURITY DEFINER, so they bypass RLS on purpose and are
+-- responsible for their own authorisation checks.
+
+-- ------------------------------------------------------------------------------
+-- place_order: the only way an order is created.
+--
+-- Why an RPC instead of client-side inserts:
+--   1. Atomicity  - stock check, stock deduction, order, line items and the
+--                   audit rows either all commit or all roll back. The old
+--                   client-side version could deduct stock and then fail to
+--                   write the order, losing inventory with nothing to show.
+--   2. Oversell   - two shoppers buying the last item at the same moment both
+--                   passed the client-side check. FOR UPDATE row locks serialise
+--                   them, so the second one is told it is out of stock.
+--   3. Pricing    - prices, tax and totals are recomputed from the products
+--                   table. The browser sends product ids and quantities only,
+--                   so a tampered request cannot buy a $40 item for $0.01.
+--   4. RLS        - a customer has no UPDATE rights on products, so they could
+--                   never deduct their own stock. This function can.
+--
+-- p_items shape: [{"product_id": "prod_1", "quantity": 2}, ...]
+-- ------------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.place_order(
+    p_items            JSONB,
+    p_customer_name    TEXT,
+    p_phone            TEXT,
+    p_email            TEXT,
+    p_address          JSONB,
+    p_fulfillment_type fulfillment_type DEFAULT 'delivery',
+    p_delivery_slot    TEXT DEFAULT 'Standard (Within 45 mins)',
+    p_payment_method   payment_method_type DEFAULT 'cash_on_delivery',
+    p_payment_status   payment_status_type DEFAULT 'pending',
+    p_payment_details  JSONB DEFAULT '{}'::jsonb,
+    p_transaction_id   TEXT DEFAULT NULL,
+    p_utr_number       TEXT DEFAULT NULL,
+    p_notes            TEXT DEFAULT ''
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+    v_order_id      UUID;
+    v_order_number  TEXT;
+    v_item          JSONB;
+    v_product       public.products%ROWTYPE;
+    v_qty           INT;
+    v_line_total    NUMERIC(10,2);
+    v_subtotal      NUMERIC(10,2) := 0;
+    v_delivery_fee  NUMERIC(10,2) := 0;
+    v_tax           NUMERIC(10,2) := 0;
+    v_total         NUMERIC(10,2) := 0;
+    -- These three MUST match src/context/CartContext.tsx, or the total the
+    -- shopper was shown will differ from the total actually charged.
+    v_free_over     NUMERIC(10,2) := 35.00;  -- FREE_DELIVERY_THRESHOLD
+    v_flat_fee      NUMERIC(10,2) := 3.99;   -- STANDARD_DELIVERY_FEE
+    v_tax_rate      NUMERIC(6,4)  := 0.08;   -- TAX_RATE (8%)
+BEGIN
+    IF p_items IS NULL OR jsonb_array_length(p_items) = 0 THEN
+        RAISE EXCEPTION 'Your basket is empty';
+    END IF;
+
+    -- Pass 1: lock each product row, verify stock, and price the line.
+    FOR v_item IN SELECT * FROM jsonb_array_elements(p_items)
+    LOOP
+        v_qty := GREATEST((v_item->>'quantity')::INT, 0);
+        IF v_qty = 0 THEN
+            CONTINUE;
+        END IF;
+
+        SELECT * INTO v_product
+        FROM public.products
+        WHERE id = v_item->>'product_id'
+        FOR UPDATE;                         -- serialises concurrent checkouts
+
+        IF NOT FOUND THEN
+            RAISE EXCEPTION 'Product % is no longer available', v_item->>'product_id';
+        END IF;
+
+        IF NOT v_product.is_active THEN
+            RAISE EXCEPTION '% has been delisted', v_product.name;
+        END IF;
+
+        IF v_product.stock_quantity < v_qty THEN
+            RAISE EXCEPTION 'Only % left of %', v_product.stock_quantity, v_product.name;
+        END IF;
+
+        v_subtotal := v_subtotal + (v_product.price * v_qty);
+    END LOOP;
+
+    IF v_subtotal = 0 THEN
+        RAISE EXCEPTION 'Your basket is empty';
+    END IF;
+
+    IF p_fulfillment_type = 'delivery' AND v_subtotal < v_free_over THEN
+        v_delivery_fee := v_flat_fee;
+    END IF;
+
+    v_tax   := ROUND(v_subtotal * v_tax_rate, 2);
+    v_total := v_subtotal + v_delivery_fee + v_tax;
+
+    v_order_number := 'FM-' || TO_CHAR(NOW(), 'YYYYMMDD') || '-' ||
+                      LPAD((FLOOR(RANDOM() * 100000))::TEXT, 5, '0');
+
+    INSERT INTO public.orders (
+        user_id, order_number, customer_name, phone, email, address,
+        fulfillment_type, delivery_slot, payment_method, payment_status,
+        order_status, transaction_id, utr_number, payment_details,
+        subtotal, delivery_fee, tax, total, notes
+    ) VALUES (
+        auth.uid(), v_order_number, p_customer_name, p_phone, p_email, p_address,
+        p_fulfillment_type, p_delivery_slot, p_payment_method, p_payment_status,
+        (CASE WHEN p_payment_status = 'paid' THEN 'confirmed' ELSE 'pending' END)::order_status_type,
+        p_transaction_id, p_utr_number, COALESCE(p_payment_details, '{}'::jsonb),
+        v_subtotal, v_delivery_fee, v_tax, v_total, COALESCE(p_notes, '')
+    )
+    RETURNING id INTO v_order_id;
+
+    -- Pass 2: write line items, deduct stock, log the audit trail.
+    FOR v_item IN SELECT * FROM jsonb_array_elements(p_items)
+    LOOP
+        v_qty := GREATEST((v_item->>'quantity')::INT, 0);
+        IF v_qty = 0 THEN
+            CONTINUE;
+        END IF;
+
+        SELECT * INTO v_product
+        FROM public.products
+        WHERE id = v_item->>'product_id';
+
+        v_line_total := v_product.price * v_qty;
+
+        INSERT INTO public.order_items (
+            order_id, product_id, product_name, unit, unit_price, quantity, subtotal
+        ) VALUES (
+            v_order_id, v_product.id, v_product.name, v_product.unit,
+            v_product.price, v_qty, v_line_total
+        );
+
+        UPDATE public.products
+        SET stock_quantity = stock_quantity - v_qty
+        WHERE id = v_product.id;
+
+        INSERT INTO public.inventory_adjustments (
+            product_id, adjustment_type, quantity_change,
+            previous_quantity, new_quantity, reason, performed_by
+        ) VALUES (
+            v_product.id, 'sale', -v_qty,
+            v_product.stock_quantity, v_product.stock_quantity - v_qty,
+            'Order ' || v_order_number, COALESCE(p_customer_name, 'Storefront')
+        );
+    END LOOP;
+
+    -- Return the whole order, items included, rather than just an id.
+    -- A guest checkout has user_id = NULL, and the SELECT policy on orders
+    -- compares auth.uid() = user_id, which is NULL = NULL -> never true. So a
+    -- guest could place an order and then be unable to read it back for their
+    -- own receipt. Returning it here sidesteps that entirely.
+    RETURN (
+        SELECT to_jsonb(o) || jsonb_build_object(
+            'items', COALESCE(
+                (SELECT jsonb_agg(to_jsonb(oi)) FROM public.order_items oi WHERE oi.order_id = o.id),
+                '[]'::jsonb
+            )
+        )
+        FROM public.orders o
+        WHERE o.id = v_order_id
+    );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.place_order FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.place_order TO anon, authenticated;
+
+
+-- ------------------------------------------------------------------------------
+-- admin_adjust_stock: stock change + audit row in one transaction.
+-- Checks is_admin() itself, because SECURITY DEFINER skips RLS.
+-- ------------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.admin_adjust_stock(
+    p_product_id      TEXT,
+    p_adjustment_type adjustment_type,
+    p_quantity_change INT,
+    p_reason          TEXT,
+    p_performed_by    TEXT DEFAULT 'Store Admin'
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+    v_product public.products%ROWTYPE;
+    v_new_qty INT;
+BEGIN
+    IF NOT public.is_admin() THEN
+        RAISE EXCEPTION 'Administrator access required';
+    END IF;
+
+    IF p_reason IS NULL OR btrim(p_reason) = '' THEN
+        RAISE EXCEPTION 'A reason is required for every stock adjustment';
+    END IF;
+
+    SELECT * INTO v_product FROM public.products WHERE id = p_product_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'No such product: %', p_product_id;
+    END IF;
+
+    -- p_quantity_change is ALWAYS a delta, including for manual_count.
+    -- StockAdjustModal.tsx converts a physical count into (count - current)
+    -- before calling, so treating it as absolute here would corrupt the figure.
+    v_new_qty := v_product.stock_quantity + p_quantity_change;
+
+    IF v_new_qty < 0 THEN
+        RAISE EXCEPTION 'That would leave stock at %, which is below zero', v_new_qty;
+    END IF;
+
+    UPDATE public.products SET stock_quantity = v_new_qty WHERE id = p_product_id;
+
+    INSERT INTO public.inventory_adjustments (
+        product_id, adjustment_type, quantity_change,
+        previous_quantity, new_quantity, reason, performed_by
+    ) VALUES (
+        p_product_id, p_adjustment_type, v_new_qty - v_product.stock_quantity,
+        v_product.stock_quantity, v_new_qty, p_reason, p_performed_by
+    );
+
+    RETURN jsonb_build_object(
+        'product_id',        p_product_id,
+        'previous_quantity', v_product.stock_quantity,
+        'new_quantity',      v_new_qty
+    );
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.admin_adjust_stock FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.admin_adjust_stock TO authenticated;
+
+
+-- ------------------------------------------------------------------------------
+-- admin_cancel_order: cancel + restore reserved stock atomically.
+-- ------------------------------------------------------------------------------
+CREATE OR REPLACE FUNCTION public.admin_cancel_order(p_order_id UUID)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+    v_order  public.orders%ROWTYPE;
+    v_line   public.order_items%ROWTYPE;
+    v_before INT;
+BEGIN
+    IF NOT public.is_admin() THEN
+        RAISE EXCEPTION 'Administrator access required';
+    END IF;
+
+    SELECT * INTO v_order FROM public.orders WHERE id = p_order_id FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'No such order';
+    END IF;
+
+    IF v_order.order_status = 'cancelled' THEN
+        RAISE EXCEPTION 'That order is already cancelled';
+    END IF;
+
+    FOR v_line IN SELECT * FROM public.order_items WHERE order_id = p_order_id
+    LOOP
+        SELECT stock_quantity INTO v_before
+        FROM public.products WHERE id = v_line.product_id FOR UPDATE;
+
+        UPDATE public.products
+        SET stock_quantity = stock_quantity + v_line.quantity
+        WHERE id = v_line.product_id;
+
+        INSERT INTO public.inventory_adjustments (
+            product_id, adjustment_type, quantity_change,
+            previous_quantity, new_quantity, reason, performed_by
+        ) VALUES (
+            v_line.product_id, 'cancellation_restore', v_line.quantity,
+            v_before, v_before + v_line.quantity,
+            'Order ' || v_order.order_number || ' cancelled - stock restored',
+            'Store Admin'
+        );
+    END LOOP;
+
+    UPDATE public.orders SET order_status = 'cancelled' WHERE id = p_order_id;
+
+    RETURN jsonb_build_object('id', p_order_id, 'order_status', 'cancelled');
+END;
+$$;
+
+REVOKE ALL ON FUNCTION public.admin_cancel_order FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.admin_cancel_order TO authenticated;
+
+
+-- ==============================================================================
+-- 9. CREATING YOUR FIRST ADMIN
+-- ==============================================================================
+-- Roles are never self-assigned. Sign up through the site like a normal
+-- customer, then run this once in the Supabase SQL Editor with your own email:
+--
+--     UPDATE public.profiles SET role = 'admin' WHERE email = 'you@example.com';
+--
+-- Confirm it took effect:
+--
+--     SELECT email, role FROM public.profiles ORDER BY created_at;
+--
+-- Sign out and back in for the new role to load. Note that the SQL Editor runs
+-- as the service role and so bypasses the guard trigger above; that is expected
+-- and is the only intended path to admin.

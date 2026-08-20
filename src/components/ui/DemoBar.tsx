@@ -39,6 +39,10 @@ export const DemoBar: React.FC = () => {
 
         {/* Right: Quick Role Switcher & Admin Link & Reset Data */}
         <div className="flex items-center flex-wrap gap-2 sm:gap-3">
+          {/* Role switching and demo reset only make sense against localStorage.
+              With Supabase connected the role comes from profiles.role and a
+              "reset" would delete real rows, so both are hidden. */}
+          {!isConfigured && (
           <div className="flex items-center bg-slate-800/80 rounded-lg p-0.5 border border-slate-700">
             <button
               onClick={() => switchDemoRole('customer')}
@@ -63,6 +67,7 @@ export const DemoBar: React.FC = () => {
               <span>Admin Mode</span>
             </button>
           </div>
+          )}
 
           {role === 'admin' ? (
             <Link
@@ -81,14 +86,16 @@ export const DemoBar: React.FC = () => {
             </Link>
           )}
 
-          <button
-            onClick={handleReset}
-            title="Reset demo stock and test orders"
-            className="flex items-center gap-1 text-slate-400 hover:text-rose-300 hover:bg-slate-800 px-2 py-1 rounded transition-colors"
-          >
-            <RefreshCw className="w-3 h-3" />
-            <span className="hidden md:inline">Reset Demo</span>
-          </button>
+          {!isConfigured && (
+            <button
+              onClick={handleReset}
+              title="Reset demo stock and test orders"
+              className="flex items-center gap-1 text-slate-400 hover:text-rose-300 hover:bg-slate-800 px-2 py-1 rounded transition-colors"
+            >
+              <RefreshCw className="w-3 h-3" />
+              <span className="hidden md:inline">Reset Demo</span>
+            </button>
+          )}
         </div>
       </div>
     </div>

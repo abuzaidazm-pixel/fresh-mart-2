@@ -127,8 +127,12 @@ export default function AdminCategoriesPage() {
     }
 
     if (confirm(`Are you sure you want to delete department "${cat.name}"?`)) {
-      await deleteCategory(cat.id);
-      showToast(`Deleted department "${cat.name}"`, 'info');
+      try {
+        await deleteCategory(cat.id);
+        showToast(`Deleted department "${cat.name}"`, 'info');
+      } catch (err: any) {
+        showToast(err?.message || 'Could not delete the department', 'error');
+      }
     }
   };
 

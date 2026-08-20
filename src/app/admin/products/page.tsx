@@ -38,26 +38,45 @@ export default function AdminProductsPage() {
 
   const handleToggleActive = async (product: Product) => {
     const nextState = !product.is_active;
-    await updateProduct(product.id, { is_active: nextState });
-    showToast(
-      `Product "${product.name}" marked as ${nextState ? 'Active' : 'Inactive'}`,
-      'info'
-    );
+    try {
+      await updateProduct(product.id, { is_active: nextState });
+      showToast(
+        `Product "${product.name}" marked as ${nextState ? 'Active' : 'Inactive'}`,
+        'info'
+      );
+    } catch (err: any) {
+      showToast(err?.message || 'Could not update the product', 'error');
+    }
   };
 
   const handleToggleFeatured = async (product: Product) => {
     const nextState = !product.is_featured;
-    await updateProduct(product.id, { is_featured: nextState });
-    showToast(
-      `Product "${product.name}" ${nextState ? 'added to' : 'removed from'} Farm Picks`,
-      'info'
-    );
+    try {
+      await updateProduct(product.id, { is_featured: nextState });
+      showToast(
+        `Product "${product.name}" ${nextState ? 'added to' : 'removed from'} Farm Picks`,
+        'info'
+      );
+    } catch (err: any) {
+      showToast(err?.message || 'Could not update the product', 'error');
+    }
   };
 
   const handleDelete = async (product: Product) => {
     if (confirm(`Are you sure you want to delete "${product.name}" from catalog?`)) {
-      await deleteProduct(product.id);
-      showToast(`Deleted "${product.name}"`, 'info');
+      try {
+        await deleteProduct(product.id);
+        showToast(`Deleted "${product.name}"`, 'info');
+      } catch (err: any) {
+        // A product that already appears on an order cannot be deleted -
+        // order_items.product_id is ON DELETE RESTRICT, which protects history.
+        showToast(
+          err?.message?.includes('violates foreign key')
+            ? `"${product.name}" appears on past orders, so it can't be deleted. Mark it Inactive instead.`
+            : err?.message || 'Could not delete the product',
+          'error'
+        );
+      }
     }
   };
 

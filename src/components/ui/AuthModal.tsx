@@ -18,7 +18,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
   const [isAdminRole, setIsAdminRole] = useState<boolean>(false);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
 
-  const { login, signup, switchDemoRole } = useAuth();
+  const { login, signup, switchDemoRole, isConfigured } = useAuth();
   const { showToast } = useToast();
 
   if (!isOpen) return null;
@@ -29,20 +29,26 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
       showToast('Please fill in all required fields', 'error');
       return;
     }
+    if (isSignUp && password.length < 6) {
+      showToast('Password must be at least 6 characters', 'error');
+      return;
+    }
 
     setIsSubmitting(true);
-    const targetRole = isAdminRole ? 'admin' : 'customer';
 
     if (isSignUp) {
-      const res = await signup(email, fullName, targetRole);
-      if (res.success) {
+      const res = await signup(email, fullName, password);
+      if (res.success && res.needsConfirmation) {
+        showToast(`Almost there — check ${email} for a confirmation link`, 'success');
+        onClose();
+      } else if (res.success) {
         showToast(`Account created successfully! Welcome, ${fullName}`, 'success');
         onClose();
       } else {
         showToast(res.error || 'Failed to sign up', 'error');
       }
     } else {
-      const res = await login(email, targetRole);
+      const res = await login(email, password);
       if (res.success) {
         showToast(`Logged in successfully as ${email}`, 'success');
         onClose();
@@ -87,7 +93,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
           </p>
         </div>
 
-        {/* Quick Demo Login Badges */}
+        {/* Quick Demo Login Badges — local-only shortcuts, meaningless against a
+            real database, so they are hidden once Supabase is connected. */}
+        {!isConfigured && (
         <div className="mb-6 bg-slate-50 p-3 rounded-xl border border-slate-200/70">
           <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2 text-center">
             ⚡ Quick 1-Click Demo Login
@@ -111,6 +119,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
             </button>
           </div>
         </div>
+        )}
 
         <div className="relative my-5">
           <div className="absolute inset-0 flex items-center">
@@ -170,7 +179,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
             </div>
           </div>
 
-          {isSignUp && (
+          {/* Self-service admin registration only exists in demo mode. Against a
+              real database the role lives in profiles.role and is granted by an
+              existing admin — offering a checkbox here would be a privilege
+              escalation, and the database would reject it regardless. */}
+          {isSignUp && !isConfigured && (
             <div className="flex items-center gap-2 pt-1">
               <input
                 type="checkbox"
@@ -183,6 +196,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose }) => {
                 Register as <span className="font-semibold text-amber-700">Admin / Store Staff</span>
               </label>
             </div>
+          )}
+
+          {isSignUp && isConfigured && (
+            <p className="text-[11px] leading-relaxed text-slate-500 bg-slate-50 border border-slate-200/70 rounded-lg p-2.5">
+              New accounts are created as customers. Store staff are promoted by an
+              existing administrator.
+            </p>
           )}
 
           <button

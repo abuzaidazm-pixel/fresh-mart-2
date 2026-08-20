@@ -24,7 +24,7 @@ export default function AdminLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const { user, isAdminUnlocked, unlockAdmin, lockAdmin } = useAuth();
+  const { user, isAdminUnlocked, unlockAdmin, lockAdmin, isConfigured, isLoading } = useAuth();
   const { showToast } = useToast();
 
   const [passcode, setPasscode] = useState('');
@@ -52,6 +52,50 @@ export default function AdminLayout({
     }
     setIsSubmitting(false);
   };
+
+  // With Supabase connected there is no passcode to type: admin comes from
+  // profiles.role and is enforced by RLS in the database. Typing a code here
+  // would open the menus while every query behind them still failed, so the
+  // gate explains what to do instead.
+  if (isConfigured && !isAdminUnlocked) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4 text-slate-100">
+        <div className="max-w-md w-full bg-slate-900 border border-slate-800 rounded-3xl p-8 shadow-2xl space-y-5 text-center">
+          <div className="w-16 h-16 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-400 flex items-center justify-center mx-auto">
+            <Lock className="w-8 h-8" />
+          </div>
+          <div>
+            <h1 className="text-2xl font-black text-white tracking-tight">
+              Staff access required
+            </h1>
+            <p className="text-sm text-slate-400 mt-2 leading-relaxed">
+              {isLoading
+                ? 'Checking your account…'
+                : user
+                ? `You're signed in as ${user.email}, which is a customer account. Store staff need the admin role on their profile.`
+                : 'Sign in with a store staff account to reach inventory, pricing and order fulfilment.'}
+            </p>
+          </div>
+          <div className="text-left text-xs text-slate-400 bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-2">
+            <p className="font-semibold text-slate-300">Granting admin access</p>
+            <p>
+              In the Supabase SQL Editor, run:
+            </p>
+            <code className="block bg-black/50 rounded-lg p-2.5 text-[11px] text-emerald-300 break-all">
+              update public.profiles set role = &apos;admin&apos; where email = &apos;you@example.com&apos;;
+            </code>
+            <p>Then sign out and back in.</p>
+          </div>
+          <Link
+            href="/"
+            className="inline-block w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-xl text-sm transition-colors"
+          >
+            Back to the store
+          </Link>
+        </div>
+      </div>
+    );
+  }
 
   // If Admin Panel is Locked, show the Security Authentication Gate
   if (!isAdminUnlocked) {
