@@ -162,7 +162,7 @@ export const Header: React.FC = () => {
         </div>
 
         {/* Main Navigation Bar */}
-        <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between gap-3 sm:gap-6">
+        <div className="max-w-7xl mx-auto px-3 sm:px-4 py-3 flex items-center justify-between gap-2 sm:gap-6">
           {/* Logo & Brand */}
           <Link href="/" className="flex items-center gap-2.5 shrink-0 group">
             <div className="w-10 h-10 rounded-xl bg-gradient-to-tr from-emerald-700 to-emerald-500 flex items-center justify-center text-white shadow-md shadow-emerald-700/20 group-hover:scale-105 transition-transform">
@@ -202,7 +202,7 @@ export const Header: React.FC = () => {
           </div>
 
           {/* Search Bar with live autocomplete */}
-          <div ref={searchRef} className="flex-1 max-w-2xl relative">
+          <div ref={searchRef} className="flex-1 min-w-0 max-w-2xl relative">
             <form onSubmit={handleSearchSubmit} className="flex w-full">
               {/* Category Filter dropdown */}
               <div className="hidden sm:flex items-center relative">
@@ -222,7 +222,7 @@ export const Header: React.FC = () => {
               </div>
 
               {/* Input field */}
-              <div className="relative flex-1">
+              <div className="relative flex-1 min-w-0">
                 <input
                   type="text"
                   value={searchQuery}
@@ -231,7 +231,7 @@ export const Header: React.FC = () => {
                     setShowSearchDropdown(true);
                   }}
                   onFocus={() => setShowSearchDropdown(true)}
-                  placeholder="Search fresh milk, organic apples, sourdough, olive oil..."
+                  placeholder="Search for milk, apples, bread…"
                   className="w-full h-11 pl-4 pr-10 bg-slate-50 border border-slate-200 focus:bg-white focus:border-emerald-500 focus:outline-none text-sm text-slate-800 transition-all rounded-l-xl sm:rounded-l-none rounded-r-none"
                 />
                 {searchQuery && (
@@ -248,7 +248,8 @@ export const Header: React.FC = () => {
               {/* Search submit button */}
               <button
                 type="submit"
-                className="h-11 px-4 sm:px-5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-r-xl flex items-center justify-center transition-colors shadow-sm"
+                aria-label="Search products"
+                className="h-11 px-4 sm:px-5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-r-xl flex items-center justify-center transition-colors shadow-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2"
               >
                 <Search className="w-4 h-4" />
               </button>

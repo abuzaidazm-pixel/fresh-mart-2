@@ -42,3 +42,37 @@
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
 }
+
+
+/* ---------------------------------------------------------------------------
+   Accessibility baseline
+   --------------------------------------------------------------------------- */
+
+/* Tailwind's reset removes the browser's focus ring; without a replacement,
+   keyboard users cannot see where they are. This restores one globally. */
+:focus-visible {
+  outline: 2px solid #059669;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Let people who set "reduce motion" in their OS opt out of animation. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Safety net: a single mis-sized element should never make the whole page
+   scroll sideways on a phone. The real fixes are in the components; this stops
+   a future regression from breaking the layout for customers. */
+html,
+body {
+  overflow-x: hidden;
+  max-width: 100%;
+}

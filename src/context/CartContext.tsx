@@ -35,43 +35,65 @@ export const CartProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const STANDARD_DELIVERY_FEE = 3.99;
   const TAX_RATE = 0.08; // 8%
 
+  /**
+   * `hasHydrated` exists to stop the save effect from firing before the load
+   * effect has restored the basket.
+   *
+   * Without it, the first render (items = []) wrote "[]" straight over the
+   * saved basket, and under React StrictMode — which mounts effects twice —
+   * the second load then read that "[]" back and emptied the cart for real.
+   * The symptom was a shopper adding items, moving to another page, and
+   * finding the basket empty.
+   */
+  const [hasHydrated, setHasHydrated] = useState<boolean>(false);
+
   // Load cart from LocalStorage on mount
   useEffect(() => {
-    const savedCart = localStorage.getItem('freshmart_cart');
-    if (savedCart) {
-      try {
-        setItems(JSON.parse(savedCart));
-      } catch {
-        setItems([]);
-      }
+    try {
+      const savedCart = localStorage.getItem('freshmart_cart');
+      if (savedCart) setItems(JSON.parse(savedCart));
+    } catch {
+      setItems([]);
     }
+    setHasHydrated(true);
   }, []);
 
-  // Save cart to LocalStorage
+  // Save cart to LocalStorage — only once the saved basket has been read back.
   useEffect(() => {
-    localStorage.setItem('freshmart_cart', JSON.stringify(items));
-  }, [items]);
-
-  // Keep cart items' product stock synchronized with live store products
-  useEffect(() => {
-    if (products.length > 0 && items.length > 0) {
-      setItems(prev =>
-        prev
-          .map(cartItem => {
-            const currentProd = products.find(p => p.id === cartItem.product.id);
-            if (!currentProd || !currentProd.is_active || currentProd.stock_quantity <= 0) {
-              return null; // remove if inactive or 0 stock
-            }
-            // cap quantity to available stock
-            const cappedQty = Math.min(cartItem.quantity, currentProd.stock_quantity);
-            return {
-              product: currentProd,
-              quantity: cappedQty,
-            };
-          })
-          .filter(Boolean) as CartItem[]
-      );
+    if (!hasHydrated) return;
+    try {
+      localStorage.setItem('freshmart_cart', JSON.stringify(items));
+    } catch {
+      /* quota or private mode — the basket still works for this session */
     }
+  }, [items, hasHydrated]);
+
+  // Keep cart items' product stock synchronized with live store products.
+  // The work happens inside the updater so it always sees the current basket;
+  // gating on `items.length` from the effect closure read a stale value.
+  useEffect(() => {
+    if (products.length === 0) return;
+    setItems(prev => {
+      if (prev.length === 0) return prev;
+      const next = prev
+        .map(cartItem => {
+          const currentProd = products.find(p => p.id === cartItem.product.id);
+          if (!currentProd || !currentProd.is_active || currentProd.stock_quantity <= 0) {
+            return null; // drop anything delisted or sold out
+          }
+          return {
+            product: currentProd,
+            quantity: Math.min(cartItem.quantity, currentProd.stock_quantity),
+          };
+        })
+        .filter(Boolean) as CartItem[];
+
+      // Returning `prev` when nothing changed avoids a needless re-render loop.
+      const unchanged =
+        next.length === prev.length &&
+        next.every((it, i) => it.quantity === prev[i].quantity && it.product === prev[i].product);
+      return unchanged ? prev : next;
+    });
   }, [products]);
 
   const addToCart = (product: Product, quantity: number = 1) => {

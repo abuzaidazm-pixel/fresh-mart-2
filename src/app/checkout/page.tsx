@@ -66,7 +66,7 @@ export default function CheckoutPage() {
 
   const [fulfillmentType, setFulfillmentType] = useState<FulfillmentType>('delivery');
   const [deliverySlot, setDeliverySlot] = useState<string>('Today (Express 30-45 mins)');
-  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('card_online');
+  const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('cash_on_delivery');
 
   // Customer Contact State
   const [customerName, setCustomerName] = useState<string>(user?.full_name || 'Pooja Sharma');
@@ -90,18 +90,7 @@ export default function CheckoutPage() {
   const [copiedIfsc, setCopiedIfsc] = useState<boolean>(false);
 
   // Credit / Debit Card Form State
-  const [cardType, setCardType] = useState<'debit' | 'credit' | 'rupay'>('debit');
-  const [cardNumber, setCardNumber] = useState<string>('4242 4242 4242 4242');
-  const [cardHolder, setCardHolder] = useState<string>('POOJA SHARMA');
-  const [cardExpiry, setCardExpiry] = useState<string>('12/28');
-  const [cardCvc, setCardCvc] = useState<string>('888');
-  const [selectedBank, setSelectedBank] = useState<string>('HDFC Bank');
 
-  // 3D Secure / OTP Modal State
-  const [isCardOtpModalOpen, setIsCardOtpModalOpen] = useState<boolean>(false);
-  const [cardOtp, setCardOtp] = useState<string>('');
-  const [otpError, setOtpError] = useState<string>('');
-  const [isOtpSubmitting, setIsOtpSubmitting] = useState<boolean>(false);
 
   const [isProcessingPayment, setIsProcessingPayment] = useState<boolean>(false);
   const [paymentStepText, setPaymentStepText] = useState<string>('Verifying inventory & reserving items...');
@@ -112,16 +101,7 @@ export default function CheckoutPage() {
   const actualTotal = Number((subtotal + actualDeliveryFee + actualTax).toFixed(2));
 
   // Detect Card Brand from number
-  const getCardBrand = (num: string) => {
-    const clean = num.replace(/\s+/g, '');
-    if (clean.startsWith('4')) return { brand: 'VISA', color: 'text-blue-600', bg: 'bg-blue-100' };
-    if (clean.startsWith('5')) return { brand: 'MASTERCARD', color: 'text-rose-600', bg: 'bg-rose-100' };
-    if (clean.startsWith('65') || clean.startsWith('60') || clean.startsWith('81'))
-      return { brand: 'RUPAY', color: 'text-emerald-700', bg: 'bg-emerald-100' };
-    return { brand: 'CARD', color: 'text-slate-700', bg: 'bg-slate-100' };
-  };
 
-  const detectedCard = getCardBrand(cardNumber);
 
   // Dynamic UPI Deep Link URI for direct mobile payments
   const dynamicUpiUri = `upi://pay?pa=${encodeURIComponent(bankSettings.upi_id)}&pn=${encodeURIComponent(
@@ -132,50 +112,6 @@ export default function CheckoutPage() {
   const qrCodeImageUrl = `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(
     dynamicUpiUri
   )}`;
-
-  // Auto-format card number
-  const handleCardNumberChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const raw = e.target.value.replace(/\D/g, '').slice(0, 16);
-    const formatted = raw.replace(/(\d{4})(?=\d)/g, '$1 ');
-    setCardNumber(formatted);
-  };
-
-  const handleExpiryChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    let raw = e.target.value.replace(/\D/g, '').slice(0, 4);
-    if (raw.length >= 3) {
-      raw = raw.slice(0, 2) + '/' + raw.slice(2);
-    }
-    setCardExpiry(raw);
-  };
-
-  // Quick Preset Test Cards
-  const fillPresetCard = (type: 'visa' | 'rupay' | 'mastercard') => {
-    if (type === 'visa') {
-      setCardType('debit');
-      setCardNumber('4242 4242 4242 4242');
-      setCardHolder(user?.full_name?.toUpperCase() || 'POOJA SHARMA');
-      setCardExpiry('12/28');
-      setCardCvc('888');
-      setSelectedBank('HDFC Bank');
-      showToast('Loaded Demo Visa Debit Card', 'info');
-    } else if (type === 'rupay') {
-      setCardType('rupay');
-      setCardNumber('6521 8934 5612 9012');
-      setCardHolder(user?.full_name?.toUpperCase() || 'POOJA SHARMA');
-      setCardExpiry('08/29');
-      setCardCvc('765');
-      setSelectedBank('State Bank of India (SBI)');
-      showToast('Loaded Demo RuPay Indian Debit Card', 'info');
-    } else if (type === 'mastercard') {
-      setCardType('credit');
-      setCardNumber('5324 1823 9081 4455');
-      setCardHolder(user?.full_name?.toUpperCase() || 'POOJA SHARMA');
-      setCardExpiry('11/27');
-      setCardCvc('342');
-      setSelectedBank('ICICI Bank');
-      showToast('Loaded Demo Mastercard Credit Card', 'info');
-    }
-  };
 
   if (items.length === 0) {
     return (
@@ -244,56 +180,14 @@ export default function CheckoutPage() {
       return;
     }
 
-    // 2. If Credit / Debit Card is chosen, strictly validate card inputs and open 3D Secure OTP Modal
-    if (paymentMethod === 'card_online') {
-      const cleanCard = cardNumber.replace(/\s+/g, '');
-      if (cleanCard.length < 15) {
-        showToast('Please enter a valid 16-digit debit/credit card number', 'error');
-        return;
-      }
-      if (!cardHolder.trim()) {
-        showToast('Please enter the name printed on your card', 'error');
-        return;
-      }
-      if (cardExpiry.length < 5 || !cardExpiry.includes('/')) {
-        showToast('Please enter a valid card expiry date (MM/YY)', 'error');
-        return;
-      }
-      if (cardCvc.length < 3) {
-        showToast('Please enter a valid 3 or 4 digit CVV/CVC code', 'error');
-        return;
-      }
+    // Card payments are intentionally not handled here. A simulated authorisation
+    // that tells a customer "payment successful" without money moving is worse
+    // than having no card option at all.
 
-      // Open 3D Secure OTP verification window
-      setOtpError('');
-      setCardOtp('123456'); // Pre-fill test OTP for seamless testing
-      setIsCardOtpModalOpen(true);
-      return;
-    }
-
-    // 3. Direct placement for Cash on Delivery or Bank Wire
+    // 2. Direct placement for Cash on Delivery, Pay at Store or Bank Wire
     executeOrderPlacement();
   };
 
-  // Handle Card 3D Secure OTP verification submission
-  const handleVerifyCardOtp = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!cardOtp || cardOtp.trim().length !== 6) {
-      setOtpError('Please enter a valid 6-digit OTP received on your mobile.');
-      return;
-    }
-
-    setIsOtpSubmitting(true);
-    setOtpError('');
-    await new Promise(r => setTimeout(r, 800));
-
-    // Simulated check: Any 6 digit OTP is valid (demo 123456)
-    setIsOtpSubmitting(false);
-    setIsCardOtpModalOpen(false);
-
-    // Now execute order placement after successful 3D Secure authorization
-    executeOrderPlacement();
-  };
 
   // Final Order Placement Execution
   const executeOrderPlacement = async (overrideUtr?: string) => {
@@ -306,11 +200,6 @@ export default function CheckoutPage() {
       await new Promise(r => setTimeout(r, 700));
       setPaymentStepText('Settlement verified on UPI / NPCI Network...');
       await new Promise(r => setTimeout(r, 600));
-    } else if (paymentMethod === 'card_online') {
-      setPaymentStepText(`Processing 3D Secure charge of ₹${actualTotal.toFixed(2)} on ${detectedCard.brand}...`);
-      await new Promise(r => setTimeout(r, 700));
-      setPaymentStepText('Payment authorized by issuing bank. Generating invoice...');
-      await new Promise(r => setTimeout(r, 500));
     } else if (paymentMethod === 'bank_transfer') {
       setPaymentStepText(`Recording direct IMPS/NEFT transfer to ${bankSettings.bank_name}...`);
       await new Promise(r => setTimeout(r, 600));
@@ -345,16 +234,13 @@ export default function CheckoutPage() {
           };
 
     const isInstantPay =
-      paymentMethod === 'upi_intent' ||
-      paymentMethod === 'card_online' ||
-      paymentMethod === 'digital_wallet';
+      paymentMethod === 'upi_intent' || paymentMethod === 'digital_wallet';
 
     const finalUtr =
       overrideUtr ||
       enteredUtr.trim() ||
       (isInstantPay ? `${Math.floor(100000000000 + Math.random() * 900000000000)}` : undefined);
 
-    const cleanCard = cardNumber.replace(/\s+/g, '');
 
     const orderResult = await createOrder({
       userId: user?.id || null,
@@ -375,8 +261,6 @@ export default function CheckoutPage() {
             : paymentMethod === 'digital_wallet'
             ? 'GOOGLE_PAY'
             : undefined,
-        cardBrand: paymentMethod === 'card_online' ? detectedCard.brand : undefined,
-        cardLast4: paymentMethod === 'card_online' ? cleanCard.slice(-4) : undefined,
         bankRef: paymentMethod === 'bank_transfer' ? bankSettings.account_number : undefined,
       },
       notes,
@@ -394,11 +278,6 @@ export default function CheckoutPage() {
       if (paymentMethod === 'cash_on_delivery') {
         showToast(
           `🎉 Order #${orderResult.order.order_number} confirmed! Pay ₹${actualTotal.toFixed(2)} on delivery.`,
-          'success'
-        );
-      } else if (paymentMethod === 'card_online') {
-        showToast(
-          `🎉 Payment of ₹${actualTotal.toFixed(2)} Successful on ${detectedCard.brand} •••• ${cleanCard.slice(-4)}! Order confirmed.`,
           'success'
         );
       } else {
@@ -428,12 +307,12 @@ export default function CheckoutPage() {
             Checkout & Direct Payment
           </h1>
           <p className="text-xs text-slate-500 mt-1">
-            Pay directly using Debit/Credit Cards (3D Secure), UPI (GPay/PhonePe), or Cash on Delivery
+            Pay by UPI, on delivery, or at the store counter
           </p>
         </div>
         <div className="flex items-center gap-1.5 text-xs text-emerald-800 font-bold bg-emerald-50 border border-emerald-200 px-3.5 py-1.5 rounded-xl self-start sm:self-auto shadow-sm">
           <ShieldCheck className="w-4 h-4 text-emerald-600" />
-          <span>RBI 3D Secure & Encrypted Checkout</span>
+          <span>Secure Checkout</span>
         </div>
       </div>
 
@@ -518,7 +397,7 @@ export default function CheckoutPage() {
               </div>
 
               <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">Mobile Number (For Bank OTP / SMS) *</label>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Mobile Number (for delivery updates) *</label>
                 <div className="relative">
                   <Phone className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
                   <input
@@ -703,17 +582,20 @@ export default function CheckoutPage() {
             {/* Payment Method Tabs */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs font-bold">
               {/* Card / Netbanking Tab */}
+              {/* Cards are not enabled. Taking real card numbers requires a PCI-DSS
+                  compliant gateway (Razorpay, Stripe, Cashfree) with a server-side
+                  secret key — never a form that posts from the browser. Shown as
+                  disabled rather than hidden so customers know it is coming. */}
               <button
                 type="button"
-                onClick={() => setPaymentMethod('card_online')}
-                className={`py-3 px-3 rounded-2xl border flex flex-col items-center justify-center gap-1.5 transition-all ${
-                  paymentMethod === 'card_online'
-                    ? 'border-purple-600 bg-purple-50 text-purple-950 shadow-sm font-extrabold ring-1 ring-purple-500'
-                    : 'border-slate-200 bg-slate-50 hover:bg-white text-slate-600'
-                }`}
+                disabled
+                aria-disabled="true"
+                title="Card payments are not enabled on this store yet"
+                className="py-3 px-3 rounded-2xl border border-dashed border-slate-300 bg-slate-50 text-slate-400 flex flex-col items-center justify-center gap-1.5 cursor-not-allowed"
               >
-                <CreditCard className={`w-5 h-5 ${paymentMethod === 'card_online' ? 'text-purple-600' : 'text-slate-500'}`} />
-                <span>Debit / Credit Cards</span>
+                <CreditCard className="w-5 h-5 text-slate-300" />
+                <span>Cards</span>
+                <span className="text-[9px] font-semibold uppercase tracking-wide">Coming soon</span>
               </button>
 
               {/* UPI Tab */}
@@ -764,143 +646,6 @@ export default function CheckoutPage() {
             </div>
 
             {/* TAB CONTENT 1: Credit / Debit Card Payment Engine */}
-            {paymentMethod === 'card_online' && (
-              <div className="bg-purple-50/40 p-5 rounded-2xl border border-purple-200 space-y-4 animate-fade-in text-xs">
-                {/* Header with Quick Fill Demo Buttons */}
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-purple-200/80 pb-3">
-                  <div>
-                    <div className="font-black text-slate-900 text-sm flex items-center gap-1.5">
-                      <span>Debit / Credit Card (RuPay, Visa, Mastercard)</span>
-                      <span className="text-[10px] bg-purple-100 text-purple-800 font-bold px-2 py-0.5 rounded-full">
-                        RBI 3D Secure
-                      </span>
-                    </div>
-                    <div className="text-slate-500 text-[11px]">
-                      Protected with 256-bit encryption & Bank OTP 2-Factor Authentication
-                    </div>
-                  </div>
-
-                  {/* Preset Test Cards */}
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-[10px] font-bold text-slate-400">Quick Test:</span>
-                    <button
-                      type="button"
-                      onClick={() => fillPresetCard('visa')}
-                      className="px-2 py-1 bg-white hover:bg-blue-50 border border-blue-200 rounded-lg text-[10px] font-bold text-blue-700"
-                    >
-                      Visa
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => fillPresetCard('rupay')}
-                      className="px-2 py-1 bg-white hover:bg-emerald-50 border border-emerald-200 rounded-lg text-[10px] font-bold text-emerald-700"
-                    >
-                      RuPay
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => fillPresetCard('mastercard')}
-                      className="px-2 py-1 bg-white hover:bg-rose-50 border border-rose-200 rounded-lg text-[10px] font-bold text-rose-700"
-                    >
-                      Mastercard
-                    </button>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-                  {/* Card Number */}
-                  <div className="sm:col-span-2">
-                    <div className="flex justify-between items-center mb-1">
-                      <label className="font-bold text-slate-700">16-Digit Card Number *</label>
-                      <span className={`text-[10px] font-black px-2 py-0.5 rounded-md ${detectedCard.bg} ${detectedCard.color}`}>
-                        {detectedCard.brand}
-                      </span>
-                    </div>
-                    <div className="relative">
-                      <CreditCard className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                      <input
-                        type="text"
-                        required
-                        value={cardNumber}
-                        onChange={handleCardNumberChange}
-                        placeholder="4242 4242 4242 4242"
-                        maxLength={19}
-                        className="w-full pl-9 pr-3 py-2.5 rounded-xl border border-slate-200 font-mono text-sm font-bold tracking-wider focus:outline-none focus:ring-1 focus:ring-purple-500 bg-white"
-                      />
-                    </div>
-                  </div>
-
-                  {/* Cardholder Name */}
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">Name on Card *</label>
-                    <input
-                      type="text"
-                      required
-                      value={cardHolder}
-                      onChange={e => setCardHolder(e.target.value.toUpperCase())}
-                      placeholder="POOJA SHARMA"
-                      className="w-full px-3.5 py-2 text-xs rounded-xl border border-slate-200 font-semibold focus:outline-none focus:ring-1 focus:ring-purple-500 bg-white"
-                    />
-                  </div>
-
-                  {/* Bank Selector */}
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">Issuing Bank</label>
-                    <select
-                      value={selectedBank}
-                      onChange={e => setSelectedBank(e.target.value)}
-                      className="w-full px-3 py-2 text-xs rounded-xl border border-slate-200 focus:outline-none focus:ring-1 focus:ring-purple-500 bg-white font-medium"
-                    >
-                      <option value="HDFC Bank">HDFC Bank</option>
-                      <option value="State Bank of India (SBI)">State Bank of India (SBI)</option>
-                      <option value="ICICI Bank">ICICI Bank</option>
-                      <option value="Axis Bank">Axis Bank</option>
-                      <option value="Kotak Mahindra Bank">Kotak Mahindra Bank</option>
-                      <option value="Punjab National Bank">Punjab National Bank (PNB)</option>
-                      <option value="Bank of Baroda">Bank of Baroda</option>
-                      <option value="Other Bank">Other Indian Bank</option>
-                    </select>
-                  </div>
-
-                  {/* Expiry */}
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">Expiry (MM/YY) *</label>
-                    <input
-                      type="text"
-                      required
-                      value={cardExpiry}
-                      onChange={handleExpiryChange}
-                      placeholder="12/28"
-                      maxLength={5}
-                      className="w-full px-3.5 py-2 text-xs rounded-xl border border-slate-200 font-mono text-center font-bold focus:outline-none focus:ring-1 focus:ring-purple-500 bg-white"
-                    />
-                  </div>
-
-                  {/* CVV */}
-                  <div>
-                    <label className="block font-bold text-slate-700 mb-1">CVV / Security Code *</label>
-                    <div className="relative">
-                      <input
-                        type="password"
-                        required
-                        value={cardCvc}
-                        onChange={e => setCardCvc(e.target.value.replace(/\D/g, '').slice(0, 4))}
-                        placeholder="888"
-                        maxLength={4}
-                        className="w-full px-3.5 py-2 text-xs rounded-xl border border-slate-200 font-mono text-center font-bold focus:outline-none focus:ring-1 focus:ring-purple-500 bg-white"
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                <div className="p-3 bg-white rounded-xl border border-purple-100 flex items-center gap-2 text-[11px] text-slate-600">
-                  <Lock className="w-4 h-4 text-emerald-600 shrink-0" />
-                  <span>
-                    Clicking <strong>&ldquo;Pay ₹{actualTotal.toFixed(2)} with Card&rdquo;</strong> will prompt your bank&apos;s 3D Secure OTP verification window.
-                  </span>
-                </div>
-              </div>
-            )}
 
             {/* TAB CONTENT 2: Instant UPI Payment Box */}
             {paymentMethod === 'upi_intent' && (
@@ -1174,17 +919,13 @@ export default function CheckoutPage() {
               type="submit"
               disabled={isProcessingPayment}
               className={`w-full py-4 text-white font-black rounded-2xl text-sm transition-all shadow-lg flex items-center justify-center gap-2 disabled:opacity-50 ${
-                paymentMethod === 'card_online'
-                  ? 'bg-purple-600 hover:bg-purple-700 shadow-purple-600/20'
-                  : paymentMethod === 'upi_intent'
+                paymentMethod === 'upi_intent'
                   ? 'bg-blue-600 hover:bg-blue-700 shadow-blue-600/20'
                   : 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-600/20'
               }`}
             >
               <span>
-                {paymentMethod === 'card_online'
-                  ? `Pay ₹${actualTotal.toFixed(2)} with Card (3D Secure)`
-                  : paymentMethod === 'upi_intent'
+                {paymentMethod === 'upi_intent'
                   ? `Pay ₹${actualTotal.toFixed(2)} with UPI (QR / GPay)`
                   : paymentMethod === 'cash_on_delivery'
                   ? 'Confirm & Place Order (Cash on Delivery)'
@@ -1202,123 +943,6 @@ export default function CheckoutPage() {
       </form>
 
       {/* POPUP MODAL: Bank 3D Secure / RBI 2-Factor OTP Verification Window */}
-      {isCardOtpModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/80 backdrop-blur-md animate-fade-in">
-          <div className="bg-white rounded-3xl p-6 sm:p-8 max-w-md w-full relative shadow-2xl border border-slate-100 space-y-4 animate-slide-up text-left">
-            <button
-              onClick={() => {
-                setIsCardOtpModalOpen(false);
-                showToast('Payment cancelled. Order was not placed.', 'info');
-              }}
-              className="absolute top-5 right-5 text-slate-400 hover:text-slate-700 p-1.5 rounded-xl hover:bg-slate-100"
-            >
-              <X className="w-5 h-5" />
-            </button>
-
-            {/* Bank Header */}
-            <div className="flex items-center gap-3 border-b border-slate-100 pb-3">
-              <div className="w-10 h-10 rounded-xl bg-purple-100 text-purple-700 flex items-center justify-center font-black">
-                <ShieldCheck className="w-6 h-6 text-purple-700" />
-              </div>
-              <div>
-                <div className="text-sm font-black text-slate-900 flex items-center gap-1.5">
-                  <span>{selectedBank} 3D Secure</span>
-                  <span className={`text-[9px] font-black px-1.5 py-0.5 rounded ${detectedCard.bg} ${detectedCard.color}`}>
-                    {detectedCard.brand}
-                  </span>
-                </div>
-                <div className="text-[11px] text-slate-500">RBI Verified Two-Factor Authentication</div>
-              </div>
-            </div>
-
-            {/* Transaction Details */}
-            <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200 text-xs space-y-1.5">
-              <div className="flex justify-between">
-                <span className="text-slate-500">Merchant:</span>
-                <span className="font-bold text-slate-900">{bankSettings.merchant_name}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-slate-500">Card Number:</span>
-                <span className="font-mono font-bold text-slate-800">
-                  {detectedCard.brand} •••• {cardNumber.replace(/\s+/g, '').slice(-4)}
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-slate-500">Amount Charged:</span>
-                <span className="font-black text-emerald-700 text-sm">₹{actualTotal.toFixed(2)}</span>
-              </div>
-            </div>
-
-            {/* OTP Form */}
-            <form onSubmit={handleVerifyCardOtp} className="space-y-4 pt-1">
-              <div>
-                <label className="block text-xs font-bold text-slate-800 mb-1">
-                  Enter 6-Digit Bank OTP (One-Time Password) *
-                </label>
-                <div className="relative">
-                  <KeyRound className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                  <input
-                    type="text"
-                    required
-                    maxLength={6}
-                    value={cardOtp}
-                    onChange={e => {
-                      setCardOtp(e.target.value.replace(/\D/g, ''));
-                      setOtpError('');
-                    }}
-                    placeholder="123456"
-                    className="w-full pl-9 pr-3 py-3 rounded-xl border border-slate-300 font-mono text-center text-lg font-black tracking-widest focus:outline-none focus:ring-2 focus:ring-purple-500 bg-white"
-                  />
-                </div>
-                <div className="flex items-center justify-between text-[11px] text-slate-500 mt-1">
-                  <span>Sent to: +91 98201 XXXXX</span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setCardOtp('123456');
-                      showToast('Test OTP 123456 filled', 'info');
-                    }}
-                    className="text-purple-700 font-bold hover:underline"
-                  >
-                    Auto-Fill Test OTP
-                  </button>
-                </div>
-              </div>
-
-              {otpError && (
-                <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-semibold flex items-center gap-1.5">
-                  <AlertCircle className="w-4 h-4 shrink-0" />
-                  <span>{otpError}</span>
-                </div>
-              )}
-
-              <button
-                type="submit"
-                disabled={isOtpSubmitting}
-                className="w-full py-3.5 bg-purple-700 hover:bg-purple-800 text-white font-black rounded-xl text-xs transition-all shadow-md shadow-purple-700/20 flex items-center justify-center gap-2 disabled:opacity-50"
-              >
-                {isOtpSubmitting ? (
-                  <RefreshCw className="w-4 h-4 animate-spin" />
-                ) : (
-                  <CheckCircle2 className="w-4 h-4" />
-                )}
-                <span>{isOtpSubmitting ? 'Verifying OTP with Bank...' : `Authorize & Pay ₹${actualTotal.toFixed(2)}`}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setIsCardOtpModalOpen(false);
-                  showToast('Payment cancelled. Order was not placed.', 'info');
-                }}
-                className="w-full py-2 text-slate-500 hover:text-slate-700 text-xs font-semibold text-center"
-              >
-                Cancel & Return to Checkout
-              </button>
-            </form>
-          </div>
-        </div>
-      )}
 
       {/* POPUP MODAL: FreshMart Official UPI Details & QR Code */}
       {isUpiModalOpen && (
