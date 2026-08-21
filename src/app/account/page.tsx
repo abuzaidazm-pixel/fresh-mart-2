@@ -7,6 +7,7 @@ import { useAuth } from '@/context/AuthContext';
 import { useStore } from '@/context/StoreContext';
 import { useCart } from '@/context/CartContext';
 import { useToast } from '@/context/ToastContext';
+import { ChangePasswordCard } from '@/components/ui/ChangePasswordCard';
 import { Order } from '@/lib/types';
 import {
   User,
@@ -505,7 +506,8 @@ export default function AccountPage() {
 
       {/* TAB 3: PROFILE */}
       {activeTab === 'profile' && (
-        <div className="bg-white p-6 sm:p-8 rounded-3xl border border-slate-200 shadow-sm max-w-2xl space-y-4">
+        <div className="space-y-5">
+          <div className="bg-white p-6 sm:p-8 rounded-3xl border border-slate-200 shadow-sm max-w-2xl space-y-4">
           <h3 className="font-extrabold text-base text-slate-900 border-b pb-3">Personal Profile</h3>
           <div className="space-y-3 text-xs">
             <div>
@@ -525,6 +527,9 @@ export default function AccountPage() {
               <div className="font-bold text-emerald-700 text-sm mt-0.5">{user?.role?.toUpperCase()}</div>
             </div>
           </div>
+          </div>
+
+          <ChangePasswordCard />
         </div>
       )}
 

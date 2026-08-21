@@ -12,7 +12,14 @@ interface AuthContextType {
   isConfigured: boolean;
   isAdminUnlocked: boolean;
   unlockAdmin: (passcode: string) => boolean;
+  /**
+   * Re-enter your account password to open the admin panel. Being signed in is
+   * not enough — this is the second gate in front of pricing, stock and orders.
+   */
+  unlockAdminWithPassword: (password: string) => Promise<{ success: boolean; error?: string }>;
   lockAdmin: () => void;
+  /** Minutes the admin unlock stays valid before it re-locks itself. */
+  adminUnlockMinutes: number;
   changeAdminPasscode: (oldCode: string, newCode: string) => boolean;
   login: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
   signup: (
@@ -22,9 +29,59 @@ interface AuthContextType {
   ) => Promise<{ success: boolean; error?: string; needsConfirmation?: boolean }>;
   logout: () => Promise<void>;
   switchDemoRole: (newRole: UserRole) => void;
+  /** Verifies the current password, then sets a new one. */
+  changePassword: (
+    currentPassword: string,
+    newPassword: string
+  ) => Promise<{ success: boolean; error?: string }>;
+  /** Emails a reset link for people who are locked out. */
+  requestPasswordReset: (email: string) => Promise<{ success: boolean; error?: string }>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
+
+/* -------------------------------------------------------------------------- */
+/* Admin panel lock                                                           */
+/*                                                                            */
+/* Signing in proves who you are; this proves you are still at the keyboard.  */
+/* The unlock is kept in sessionStorage, not localStorage, so closing the tab  */
+/* re-locks the panel, and it expires on its own after the timeout below —     */
+/* an admin who walks away from an unattended machine is covered either way.   */
+/* -------------------------------------------------------------------------- */
+
+const ADMIN_UNLOCK_KEY = 'freshmart_admin_unlocked_at';
+export const ADMIN_UNLOCK_MINUTES = 30;
+const ADMIN_UNLOCK_TTL_MS = ADMIN_UNLOCK_MINUTES * 60 * 1000;
+
+/** True only if an unlock was recorded and has not aged out. */
+const isUnlockFresh = (): boolean => {
+  try {
+    const raw = sessionStorage.getItem(ADMIN_UNLOCK_KEY);
+    if (!raw) return false;
+    const stamped = Number(raw);
+    if (!Number.isFinite(stamped)) return false;
+    return Date.now() - stamped < ADMIN_UNLOCK_TTL_MS;
+  } catch {
+    // Private browsing can throw on sessionStorage access. Fail closed.
+    return false;
+  }
+};
+
+const stampUnlock = () => {
+  try {
+    sessionStorage.setItem(ADMIN_UNLOCK_KEY, String(Date.now()));
+  } catch {
+    /* ignore — the panel will simply ask again */
+  }
+};
+
+const clearUnlock = () => {
+  try {
+    sessionStorage.removeItem(ADMIN_UNLOCK_KEY);
+  } catch {
+    /* ignore */
+  }
+};
 
 /* -------------------------------------------------------------------------- */
 /* Demo identities — used ONLY when Supabase is not configured.               */
@@ -104,7 +161,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setUser(DEMO_CUSTOMER);
         localStorage.setItem('freshmart_user', JSON.stringify(DEMO_CUSTOMER));
       }
-      setIsAdminUnlocked(sessionStorage.getItem('freshmart_admin_unlocked') === 'true');
+      setIsAdminUnlocked(isUnlockFresh());
       setIsLoading(false);
       return;
     }
@@ -116,7 +173,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const profile = await loadProfile(session.user.id, session.user.email ?? '');
         if (!active) return;
         setUser(profile);
-        setIsAdminUnlocked(profile?.role === 'admin');
+        setIsAdminUnlocked(profile?.role === 'admin' && isUnlockFresh());
       }
       setIsLoading(false);
     });
@@ -129,7 +186,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         const profile = await loadProfile(session.user.id, session.user.email ?? '');
         if (!active) return;
         setUser(profile);
-        setIsAdminUnlocked(profile?.role === 'admin');
+        setIsAdminUnlocked(profile?.role === 'admin' && isUnlockFresh());
       } else {
         setUser(null);
         setIsAdminUnlocked(false);
@@ -161,8 +218,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const correct = getAdminPasscode();
     const entered = passcode.trim();
     if (entered === correct || entered === 'admin123' || entered === 'freshmart2026') {
+      stampUnlock();
       setIsAdminUnlocked(true);
-      sessionStorage.setItem('freshmart_admin_unlocked', 'true');
       setUser(DEMO_ADMIN);
       localStorage.setItem('freshmart_user', JSON.stringify(DEMO_ADMIN));
       return true;
@@ -170,11 +227,58 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return false;
   };
 
-  const lockAdmin = () => {
-    if (isSupabaseConfigured) return; // role is server-side; nothing to lock
-    setIsAdminUnlocked(false);
-    sessionStorage.removeItem('freshmart_admin_unlocked');
+  /**
+   * The real admin gate. Verifies the password by asking Supabase to
+   * authenticate with it — the check happens on their servers, so there is no
+   * secret sitting in the bundle for someone to read, and a wrong password is
+   * rejected by the same rate-limited endpoint that guards sign-in.
+   */
+  const unlockAdminWithPassword = async (password: string) => {
+    if (!isSupabaseConfigured || !supabase) {
+      return { success: unlockAdmin(password) };
+    }
+
+    if (!user?.email) {
+      return { success: false, error: 'Sign in first.' };
+    }
+
+    if (user.role !== 'admin') {
+      return { success: false, error: 'This account does not have staff access.' };
+    }
+
+    // Stamped before the call, not after: signInWithPassword fires an auth state
+    // change whose handler reads this key, and stamping afterwards would let
+    // that handler observe the old value and immediately re-lock the panel.
+    stampUnlock();
+
+    const { error } = await supabase.auth.signInWithPassword({
+      email: user.email,
+      password,
+    });
+
+    if (error) {
+      clearUnlock();
+      setIsAdminUnlocked(false);
+      return { success: false, error: 'Incorrect password.' };
+    }
+
+    setIsAdminUnlocked(true);
+    return { success: true };
   };
+
+  const lockAdmin = () => {
+    clearUnlock();
+    setIsAdminUnlocked(false);
+  };
+
+  /* Re-lock the panel once the unlock ages out, without needing a page load. */
+  useEffect(() => {
+    if (!isAdminUnlocked) return;
+    const timer = setInterval(() => {
+      if (!isUnlockFresh()) setIsAdminUnlocked(false);
+    }, 30_000);
+    return () => clearInterval(timer);
+  }, [isAdminUnlocked]);
 
   const changeAdminPasscode = (oldCode: string, newCode: string): boolean => {
     if (isSupabaseConfigured) return false;
@@ -192,11 +296,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setUser(next);
     localStorage.setItem('freshmart_user', JSON.stringify(next));
     if (newRole === 'admin') {
+      stampUnlock();
       setIsAdminUnlocked(true);
-      sessionStorage.setItem('freshmart_admin_unlocked', 'true');
     } else {
+      clearUnlock();
       setIsAdminUnlocked(false);
-      sessionStorage.removeItem('freshmart_admin_unlocked');
     }
   };
 
@@ -227,7 +331,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     const profile = await loadProfile(data.user.id, data.user.email ?? email);
     setUser(profile);
-    setIsAdminUnlocked(profile?.role === 'admin');
+    setIsAdminUnlocked(profile?.role === 'admin' && isUnlockFresh());
     setIsLoading(false);
     return { success: true };
   };
@@ -272,8 +376,65 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     const profile = await loadProfile(data.user!.id, email);
     setUser(profile);
-    setIsAdminUnlocked(profile?.role === 'admin');
+    setIsAdminUnlocked(profile?.role === 'admin' && isUnlockFresh());
     setIsLoading(false);
+    return { success: true };
+  };
+
+  /* -------------------------- password changes -------------------------- */
+
+  /**
+   * Supabase's updateUser() will change a password using nothing but the active
+   * session — it never asks for the old one. That means an unattended laptop or
+   * a stolen session token is enough to lock the real owner out of their own
+   * store. So the old password is verified first by re-authenticating with it,
+   * and only then is the new one set.
+   */
+  const changePassword = async (currentPassword: string, newPassword: string) => {
+    if (!isSupabaseConfigured || !supabase) {
+      return {
+        success: false,
+        error:
+          'Passwords only exist when the app is connected to Supabase. In demo mode there are no real accounts.',
+      };
+    }
+
+    if (!user?.email) {
+      return { success: false, error: 'You need to be signed in to change your password.' };
+    }
+
+    if (currentPassword === newPassword) {
+      return { success: false, error: 'The new password must be different from the current one.' };
+    }
+
+    const { error: reauthError } = await supabase.auth.signInWithPassword({
+      email: user.email,
+      password: currentPassword,
+    });
+
+    if (reauthError) {
+      return { success: false, error: 'Current password is incorrect.' };
+    }
+
+    const { error: updateError } = await supabase.auth.updateUser({ password: newPassword });
+    if (updateError) {
+      // Supabase raises this when leaked-password protection rejects the choice.
+      return { success: false, error: updateError.message };
+    }
+
+    return { success: true };
+  };
+
+  const requestPasswordReset = async (email: string) => {
+    if (!isSupabaseConfigured || !supabase) {
+      return { success: false, error: 'Password resets need Supabase to be connected.' };
+    }
+
+    const { error } = await supabase.auth.resetPasswordForEmail(email, {
+      redirectTo: `${window.location.origin}/reset-password`,
+    });
+
+    if (error) return { success: false, error: error.message };
     return { success: true };
   };
 
@@ -286,7 +447,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setUser(null);
     setIsAdminUnlocked(false);
     localStorage.removeItem('freshmart_user');
-    sessionStorage.removeItem('freshmart_admin_unlocked');
+    clearUnlock();
   };
 
   return (
@@ -298,12 +459,16 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isConfigured: isSupabaseConfigured,
         isAdminUnlocked,
         unlockAdmin,
+        unlockAdminWithPassword,
         lockAdmin,
+        adminUnlockMinutes: ADMIN_UNLOCK_MINUTES,
         changeAdminPasscode,
         login,
         signup,
         logout,
         switchDemoRole,
+        changePassword,
+        requestPasswordReset,
       }}
     >
       {children}

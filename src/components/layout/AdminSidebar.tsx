@@ -17,6 +17,7 @@ import {
   AlertTriangle,
   Lock,
   Landmark,
+  ShieldCheck,
 } from 'lucide-react';
 
 export const AdminSidebar: React.FC = () => {
@@ -76,6 +77,12 @@ export const AdminSidebar: React.FC = () => {
       href: '/admin/database',
       label: 'Supabase & Database',
       icon: Database,
+      badge: null,
+    },
+    {
+      href: '/admin/security',
+      label: 'Security & Password',
+      icon: ShieldCheck,
       badge: null,
     },
   ];

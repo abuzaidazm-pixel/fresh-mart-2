@@ -24,7 +24,15 @@ export default function AdminLayout({
 }: {
   children: React.ReactNode;
 }) {
-  const { user, isAdminUnlocked, unlockAdmin, lockAdmin, isConfigured, isLoading } = useAuth();
+  const {
+    user,
+    isAdminUnlocked,
+    unlockAdminWithPassword,
+    lockAdmin,
+    isConfigured,
+    isLoading,
+    adminUnlockMinutes,
+  } = useAuth();
   const { showToast } = useToast();
 
   const [passcode, setPasscode] = useState('');
@@ -32,23 +40,26 @@ export default function AdminLayout({
   const [errorMsg, setErrorMsg] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const handleUnlock = (e: React.FormEvent) => {
+  const handleUnlock = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!passcode.trim()) {
-      setErrorMsg('Please enter the store admin passcode');
+      setErrorMsg(isConfigured ? 'Please enter your password' : 'Please enter the store admin passcode');
       return;
     }
 
     setIsSubmitting(true);
     setErrorMsg('');
 
-    const success = unlockAdmin(passcode);
-    if (success) {
-      showToast('Admin Operations Panel unlocked successfully', 'success');
+    const res = await unlockAdminWithPassword(passcode);
+    if (res.success) {
+      showToast('Admin panel unlocked', 'success');
       setPasscode('');
     } else {
-      setErrorMsg('Incorrect passcode. Try "admin123" for demo access.');
-      showToast('Authentication failed: Invalid admin passcode', 'error');
+      setErrorMsg(
+        res.error ||
+          (isConfigured ? 'Incorrect password.' : 'Incorrect passcode. Try "admin123" for demo access.')
+      );
+      showToast('Authentication failed', 'error');
     }
     setIsSubmitting(false);
   };
@@ -57,7 +68,7 @@ export default function AdminLayout({
   // profiles.role and is enforced by RLS in the database. Typing a code here
   // would open the menus while every query behind them still failed, so the
   // gate explains what to do instead.
-  if (isConfigured && !isAdminUnlocked) {
+  if (isConfigured && !isLoading && user?.role !== 'admin') {
     return (
       <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4 text-slate-100">
         <div className="max-w-md w-full bg-slate-900 border border-slate-800 rounded-3xl p-8 shadow-2xl space-y-5 text-center">
@@ -120,7 +131,9 @@ export default function AdminLayout({
                 Admin Panel Security
               </h1>
               <p className="text-xs text-slate-400 mt-1">
-                Enter your authorized store manager passcode to access inventory, pricing, and order fulfillment controls.
+                {isConfigured
+                  ? `Signed in as ${user?.email}. Re-enter your account password to reach inventory, pricing and order fulfilment.`
+                  : 'Enter your authorized store manager passcode to access inventory, pricing, and order fulfillment controls.'}
               </p>
             </div>
           </div>
@@ -129,7 +142,7 @@ export default function AdminLayout({
           <form onSubmit={handleUnlock} className="space-y-4">
             <div>
               <label className="block text-xs font-bold text-slate-300 mb-1.5">
-                Staff Master Passcode
+                {isConfigured ? 'Your Account Password' : 'Staff Master Passcode'}
               </label>
               <div className="relative">
                 <KeyRound className="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2" />
@@ -142,7 +155,7 @@ export default function AdminLayout({
                     setPasscode(e.target.value);
                     if (errorMsg) setErrorMsg('');
                   }}
-                  placeholder="Enter passcode (e.g. admin123)"
+                  placeholder={isConfigured ? 'Enter your password' : 'Enter passcode (e.g. admin123)'}
                   className="w-full pl-10 pr-10 py-3 bg-slate-950 rounded-2xl border border-slate-700 text-white placeholder:text-slate-600 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-amber-500 focus:border-amber-500 transition-all"
                 />
                 <button
@@ -162,23 +175,30 @@ export default function AdminLayout({
               )}
             </div>
 
-            {/* Quick Demo Credentials Hint */}
-            <div className="bg-slate-950 p-3 rounded-2xl border border-slate-800 flex items-center justify-between text-xs">
-              <div className="text-slate-400">
-                <span>Demo Passcode: </span>
-                <code className="text-amber-300 font-mono font-bold">admin123</code>
+            {isConfigured ? (
+              <div className="bg-slate-950 p-3 rounded-2xl border border-slate-800 text-[11px] text-slate-400 leading-relaxed">
+                The panel re-locks after {adminUnlockMinutes} minutes and whenever
+                this tab is closed. Change this password under{' '}
+                <span className="text-slate-300 font-semibold">Account &rarr; Profile</span>.
               </div>
-              <button
-                type="button"
-                onClick={() => {
-                  setPasscode('admin123');
-                  setErrorMsg('');
-                }}
-                className="text-[11px] font-bold text-amber-400 hover:text-amber-300 underline"
-              >
-                Auto-fill
-              </button>
-            </div>
+            ) : (
+              <div className="bg-slate-950 p-3 rounded-2xl border border-slate-800 flex items-center justify-between text-xs">
+                <div className="text-slate-400">
+                  <span>Demo Passcode: </span>
+                  <code className="text-amber-300 font-mono font-bold">admin123</code>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPasscode('admin123');
+                    setErrorMsg('');
+                  }}
+                  className="text-[11px] font-bold text-amber-400 hover:text-amber-300 underline"
+                >
+                  Auto-fill
+                </button>
+              </div>
+            )}
 
             {/* Unlock Button */}
             <button
@@ -187,7 +207,7 @@ export default function AdminLayout({
               className="w-full py-3.5 bg-amber-500 hover:bg-amber-400 text-slate-950 font-black rounded-2xl text-xs uppercase tracking-wider transition-all shadow-lg shadow-amber-500/20 flex items-center justify-center gap-2 disabled:opacity-50"
             >
               <Unlock className="w-4 h-4" />
-              <span>Unlock Admin Panel</span>
+              <span>{isSubmitting ? 'Verifying…' : 'Unlock Admin Panel'}</span>
             </button>
           </form>
 
