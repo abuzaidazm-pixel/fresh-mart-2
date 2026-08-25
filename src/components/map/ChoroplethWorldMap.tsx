@@ -51,7 +51,6 @@ export function ChoroplethWorldMap({
 }: ChoroplethWorldMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
-  const lastDragMoved = useRef(false);
   const transformRef = useRef({ x: 0, y: 0, k: 1 });
   const [size, setSize] = useState({ width: 960, height: 560 });
   const [transform, setTransform] = useState({ x: 0, y: 0, k: 1 });
@@ -171,7 +170,6 @@ export function ChoroplethWorldMap({
   const onPointerDown = useCallback((event: React.PointerEvent<SVGSVGElement>) => {
     if (event.button !== 0) return;
     event.currentTarget.setPointerCapture(event.pointerId);
-    lastDragMoved.current = false;
     dragRef.current = {
       pointerId: event.pointerId,
       startX: event.clientX,
@@ -187,31 +185,39 @@ export function ChoroplethWorldMap({
     if (!drag || drag.pointerId !== event.pointerId) return;
     const dx = event.clientX - drag.startX;
     const dy = event.clientY - drag.startY;
-    if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
-    const next = { ...transformRef.current, x: drag.origX + dx, y: drag.origY + dy };
+    if (Math.abs(dx) + Math.abs(dy) <= 3) return;
+    drag.moved = true;
+    const next = { x: drag.origX + dx, y: drag.origY + dy, k: transformRef.current.k };
     transformRef.current = next;
     setTransform(next);
   }, []);
 
-  const endDrag = useCallback((event: React.PointerEvent<SVGSVGElement>) => {
-    const drag = dragRef.current;
-    if (drag && drag.pointerId === event.pointerId) {
-      lastDragMoved.current = drag.moved;
+  const endDrag = useCallback(
+    (event: React.PointerEvent<SVGSVGElement>) => {
+      const drag = dragRef.current;
+      if (!drag || drag.pointerId !== event.pointerId) return;
       dragRef.current = null;
-    }
-  }, []);
 
-  const handleCountryClick = useCallback(
-    (feature: CountryFeature, event: React.MouseEvent) => {
-      event.stopPropagation();
-      if (lastDragMoved.current) return;
-      if (selectedIso === feature.properties.iso) {
-        onSelect(null);
-      } else {
-        onSelect(feature);
+      if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
       }
+
+      // Pointer capture on the SVG swallows path click targets; hit-test instead.
+      if (drag.moved) return;
+      const hit = document
+        .elementsFromPoint(event.clientX, event.clientY)
+        .find(el => el instanceof SVGPathElement && el.dataset.iso);
+      if (!(hit instanceof SVGPathElement) || !hit.dataset.iso) {
+        onSelect(null);
+        return;
+      }
+      const iso = hit.dataset.iso;
+      const feature = paths.find(p => p.feature.properties.iso === iso)?.feature;
+      if (!feature) return;
+      if (selectedIso === iso) onSelect(null);
+      else onSelect(feature);
     },
-    [onSelect, selectedIso]
+    [onSelect, paths, selectedIso]
   );
 
   const tooltipRecord = hover ? recordsByIso.get(hover.iso) ?? null : null;
@@ -239,10 +245,6 @@ export function ChoroplethWorldMap({
         onPointerMove={onPointerMove}
         onPointerUp={endDrag}
         onPointerCancel={endDrag}
-        onClick={() => {
-          if (lastDragMoved.current) return;
-          onSelect(null);
-        }}
       >
         <rect width={size.width} height={size.height} fill="#d7ebe7" />
         <g transform={`translate(${transform.x} ${transform.y}) scale(${transform.k})`}>
@@ -256,6 +258,7 @@ export function ChoroplethWorldMap({
             return (
               <path
                 key={iso}
+                data-iso={iso}
                 d={d}
                 fill={fill}
                 stroke={isSelected ? '#064e3b' : isHovered ? '#047857' : '#f8fafc'}
@@ -283,7 +286,6 @@ export function ChoroplethWorldMap({
                   );
                 }}
                 onMouseLeave={() => setHover(null)}
-                onClick={event => handleCountryClick(feature, event)}
               />
             );
           })}
@@ -306,29 +308,31 @@ export function ChoroplethWorldMap({
         </div>
       )}
 
-      <div className="absolute left-3 bottom-3 right-3 sm:right-auto flex flex-col gap-2 max-w-sm pointer-events-none">
-        <div className="rounded-xl border border-white/70 bg-white/90 backdrop-blur-md shadow-sm px-3 py-2.5">
+      <div className="absolute left-3 top-3 z-10 max-w-[min(100%-5.5rem,20rem)] pointer-events-none">
+        <div className="rounded-xl border border-slate-200 bg-white/95 backdrop-blur-md shadow-md px-3 py-2.5">
           <div className="flex items-baseline justify-between gap-3">
             <p className="text-[11px] font-black uppercase tracking-wider text-slate-700">{metric.label}</p>
-            <p className="text-[10px] text-slate-400">{metric.invert ? 'Lower is better' : 'Higher is richer'}</p>
+            <p className="text-[10px] text-slate-400 shrink-0">
+              {metric.invert ? 'Lower is better' : 'Higher is richer'}
+            </p>
           </div>
-          <div className="mt-2 flex h-2.5 overflow-hidden rounded-full">
+          <div className="mt-2 flex h-3 overflow-hidden rounded-full ring-1 ring-slate-200">
             {stops.map(stop => (
-              <span key={stop.color} className="flex-1" style={{ background: stop.color }} />
+              <span key={stop.color} className="flex-1" style={{ background: stop.color }} title={stop.label} />
             ))}
           </div>
-          <div className="mt-1 flex justify-between text-[10px] font-medium text-slate-500">
-            <span>{stops[0]?.label}</span>
-            <span>{stops[stops.length - 1]?.label}</span>
+          <div className="mt-1.5 flex justify-between gap-2 text-[10px] font-semibold text-slate-600">
+            <span className="truncate">{stops[0]?.label}</span>
+            <span className="truncate text-right">{stops[stops.length - 1]?.label}</span>
           </div>
-          <p className="mt-1 text-[10px] text-slate-400 flex items-center gap-1.5">
-            <span className="inline-block h-2.5 w-2.5 rounded-sm bg-slate-200 border border-slate-300" />
+          <p className="mt-1.5 text-[10px] text-slate-500 flex items-center gap-1.5">
+            <span className="inline-block h-2.5 w-2.5 rounded-sm bg-slate-200 border border-slate-300 shrink-0" />
             No partnership data
           </p>
         </div>
       </div>
 
-      <div className="absolute top-3 right-3 flex flex-col gap-1.5">
+      <div className="absolute top-3 right-3 z-10 flex flex-col gap-1.5">
         <ZoomButton
           label="Zoom in"
           onClick={() => applyZoom(transform.k * 1.35, size.width / 2, size.height / 2)}
