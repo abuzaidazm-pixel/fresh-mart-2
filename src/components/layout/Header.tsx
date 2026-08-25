@@ -24,6 +24,7 @@ import {
   Compass,
   X,
   Navigation,
+  Globe2,
 } from 'lucide-react';
 
 export const Header: React.FC = () => {
@@ -445,6 +446,14 @@ export const Header: React.FC = () => {
             >
               <Flame className="w-3.5 h-3.5 text-amber-500" />
               <span>Flash Deals</span>
+            </Link>
+
+            <Link
+              href="/insights"
+              className="flex items-center gap-1 px-2.5 py-1 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-900 rounded-lg shadow-sm font-bold"
+            >
+              <Globe2 className="w-3.5 h-3.5 text-emerald-600" />
+              <span>Sourcing Map</span>
             </Link>
 
             <div className="h-4 w-px bg-slate-300 mx-1 hidden sm:block"></div>
