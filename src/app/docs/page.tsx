@@ -195,6 +195,14 @@ export default function DocsPage() {
 
                   <div className="py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                     <div>
+                      <span className="font-mono text-sm font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded">/insights</span>
+                      <p className="text-sm text-slate-600 mt-1">Interactive choropleth sourcing map with metric switcher, legend, hover tooltips, pan/zoom, and a country detail panel.</p>
+                    </div>
+                    <Link href="/insights" className="text-xs font-semibold text-emerald-600 hover:underline inline-flex items-center gap-1">Visit <ExternalLink className="w-3 h-3" /></Link>
+                  </div>
+
+                  <div className="py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                    <div>
                       <span className="font-mono text-sm font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded">/cart</span>
                       <p className="text-sm text-slate-600 mt-1">Shopping basket with quantity steppers, promo vouchers (e.g. <code className="text-xs bg-slate-100 px-1 py-0.5 rounded">FRESHMART5</code>), and delivery progress bar.</p>
                     </div>
